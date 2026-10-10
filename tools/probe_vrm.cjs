@@ -117,6 +117,151 @@ const check = (name, ok, detail = '') => {
   }
   check('the empty-state prompt is gone with a model loaded', !(await page.$('#vrmEmpty:not(.hidden)')));
 
+  // --- the face is square to the camera, and stays that way ------------------
+  // (Before any drag: facing is measured against the front of the scene, and an
+  // orbited camera is *supposed* to see the avatar's profile.)
+  // This model stands ~9.4° turned in its rest pose and the idle clip adds a little
+  // more, which reads as an avatar looking past your shoulder. The correction is
+  // measured on the world every frame, so this samples over time — a one-shot fix
+  // at load cannot work, because three-vrm has applied no pose yet at that point.
+  const yaws = [];
+  for (let i = 0; i < 8; i++) {
+    yaws.push((await page.evaluate(() => window.__vrmcall().face)).yaw);
+    await sleep(400);
+  }
+  const worstYaw = Math.max(...yaws.map(Math.abs));
+  check('the face points at the camera, within 2° over several seconds', worstYaw < 2,
+        `yaw samples ${yaws.join(', ')}`);
+  const squared = await page.evaluate(() => window.__vrmcall().squaredBy);
+  check('and the model genuinely needed squaring (this one ~9.4°)', squared > 5,
+        `largest correction ${squared}°, head yaw now ${(await page.evaluate(() => window.__vrmcall().face)).headYaw}°`);
+
+  // --- the agent list loads on this page too ---------------------------------
+  // It used to be created with loadOnInit:false and never filled, so this page had
+  // an empty dropdown until you happened to focus it — the Call page did not.
+  const vrmAgents = await page.$$eval('#vrmAgent option', o => o.filter(x => x.value).length);
+  check('the agent dropdown is populated on this page', vrmAgents > 0, vrmAgents + ' agents');
+  check('live and VRM offer the same agents',
+        vrmAgents === (await page.$$eval('#liveAgent option', o => o.filter(x => x.value).length)),
+        `${vrmAgents} here`);
+
+  // --- the transcript: its own scrollbar, newest turn on top ------------------
+  const chatCss = await page.evaluate(() => {
+    const el = document.querySelector('#vrmChat');
+    const cs = getComputedStyle(el);
+    return { overflowY: cs.overflowY, height: Math.round(el.getBoundingClientRect().height) };
+  });
+  check('the avatar transcript scrolls on its own',
+        chatCss.overflowY === 'auto' && chatCss.height > 40, JSON.stringify(chatCss));
+
+  const chat = await page.evaluate(() => {
+    const el = document.querySelector('#vrmChat');
+    el.replaceChildren();
+    window.__vrmcall.bubble('user', 'first');
+    window.__vrmcall.bubble('agent', 'second');
+    window.__vrmcall.bubble('agent', 'third');
+    return {
+      order: [...el.children].map(b => b.textContent),
+      scrollTop: el.scrollTop,
+    };
+  });
+  check('the newest turn sits at the top of the transcript',
+        chat.order[0] === 'third', JSON.stringify(chat.order));
+  check('a new turn does not leave you scrolled into history', chat.scrollTop === 0, 'scrollTop=' + chat.scrollTop);
+
+  // The point of the split: a long conversation scrolls *inside* the transcript,
+  // and the avatar stays where it is. Sharing one scroller used to carry the stage
+  // off the top of the page the moment the transcript grew.
+  await page.evaluate(() => {
+    const el = document.querySelector('#vrmChat');
+    el.replaceChildren();
+    for (let i = 0; i < 40; i++) window.__vrmcall.bubble('user', 'line ' + i);
+  });
+  const logScroll = await page.evaluate(() => {
+    const log = document.querySelector('#vrmChat');
+    log.scrollTop = log.scrollHeight;
+    const stage = document.querySelector('#vrmStage').getBoundingClientRect();
+    return {
+      scrollable: log.scrollHeight > log.clientHeight,
+      scrolled: log.scrollTop > 0,
+      stageTop: Math.round(stage.top), stageBottom: Math.round(stage.bottom),
+      viewport: window.innerHeight,
+    };
+  });
+  check('a long transcript scrolls inside its own box',
+        logScroll.scrollable && logScroll.scrolled, JSON.stringify(logScroll));
+  check('and the avatar is still on screen at the bottom of the transcript',
+        logScroll.stageTop >= 0 && logScroll.stageBottom <= logScroll.viewport,
+        `stage ${logScroll.stageTop}..${logScroll.stageBottom} of ${logScroll.viewport}`);
+
+  // --- a right-held drag moves the avatar ------------------------------------
+  // Measured off the canvas pixels rather than off a variable, because "the camera
+  // panned" and "the avatar moved on screen" are not the same claim.
+  const centreOfMass = () => page.evaluate(() => {
+    const src = document.querySelector('#vrmCanvas');
+    const c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(src, 0, 0);
+    const { data } = ctx.getImageData(0, 0, c.width, c.height);
+    let sum = 0, n = 0;
+    for (let y = 0; y < c.height; y += 4) {
+      for (let x = 0; x < c.width; x += 2) {
+        const i = (y * c.width + x) * 4;
+        // the avatar is far brighter than the dark stage
+        if (data[i] + data[i + 1] + data[i + 2] > 300) { sum += x; n++; }
+      }
+    }
+    return n ? Math.round(sum / n) : null;
+  });
+  const beforeX = await centreOfMass();
+  const box = await page.$eval('#vrmCanvas', e => {
+    const r = e.getBoundingClientRect();
+    return { x: r.x, y: r.y, w: r.width, h: r.height };
+  });
+  await page.mouse.move(box.x + box.w / 2, box.y + box.h / 2);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(box.x + box.w * 0.28, box.y + box.h / 2, { steps: 12 });
+  await page.mouse.up({ button: 'right' });
+  await sleep(900);   // damping settles
+  const afterX = await centreOfMass();
+  check('a right-held drag moves the avatar in the frame',
+        beforeX !== null && afterX !== null && Math.abs(afterX - beforeX) > 30,
+        `silhouette centre x ${beforeX} → ${afterX}`);
+
+  // --- the opening shot is a torso shot *with the whole head* ----------------
+  // Framing off a fraction of the model's height shaves the top of the hair: the
+  // head bone sits below the highest vertex. Measured off the canvas, so the claim
+  // is "nothing is touching the top edge", not "the number looks right".
+  const framing = await page.evaluate(() => {
+    const src = document.querySelector('#vrmCanvas');
+    const c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(src, 0, 0);
+    const { data } = ctx.getImageData(0, 0, c.width, c.height);
+    const x0 = Math.floor(c.width * 0.2), x1 = Math.floor(c.width * 0.8);
+    let top = null, bottom = null;
+    for (let y = 0; y < c.height; y++) {
+      let n = 0;
+      for (let x = x0; x < x1; x += 2) {
+        const i = (y * c.width + x) * 4;
+        if (data[i] + data[i + 1] + data[i + 2] > 300) n++;
+      }
+      if (n > 2) { if (top === null) top = y; bottom = y; }
+    }
+    return { top, bottom, height: c.height, width: c.width };
+  });
+  check('the whole head is in frame — the silhouette clears the top edge',
+        framing.top !== null && framing.top >= 2,
+        `first avatar row ${framing.top} of ${framing.height}`);
+  // Head level means the body is *cropped* below the shoulders: the silhouette runs
+  // off the bottom edge. A shot that ends inside the frame is a torso or full-body
+  // shot, however tight it looks at the top.
+  check('and it is a head shot — the body is cropped at the bottom edge',
+        framing.bottom !== null && framing.bottom >= framing.height - 3,
+        `last avatar row ${framing.bottom} of ${framing.height}`);
+
   // --- the bundled idle clip ------------------------------------------------
   const idle = await page.evaluate(() => window.__vrmcall().idleClip);
   check('the bundled idle clip is bound and playing on the mixer',
@@ -204,10 +349,38 @@ const check = (name, ok, detail = '') => {
   const open = await page.evaluate(() => window.__vrmcall().mouth);
   check('a voice level opens the mouth', open > 0.25, `mouth=${open}`);
 
-  const reach = await page.evaluate(() => ({ mouth: window.__vrmcall().mouth, aa: window.__vrmcall().aaExpr }));
-  check('the value reaches the VRM `aa` expression and not just a variable',
-        typeof reach.aa === 'number' && Math.abs(reach.aa - reach.mouth) < 0.05,
-        `mouth=${reach.mouth} aa=${reach.aa}`);
+  // The emote controller owns the expression, so the number that reaches the VRM
+  // is not the raw mouth value: ChatVRM draws it at half while the emotion is
+  // neutral, and at a quarter under an emotion. Reading it back off the VRM is what
+  // proves the scaling actually landed, rather than that the arithmetic in the
+  // controller is right.
+  const reach = await page.evaluate(() => window.__vrmcall());
+  check('the mouth reaches the VRM expression at the neutral weight (mouth × 0.5)',
+        typeof reach.mouthExpr === 'number' && Math.abs(reach.mouthExpr - reach.mouth * 0.5) < 0.02,
+        `mouth=${reach.mouth} → ${reach.mouthPreset}=${reach.mouthExpr}`);
+  check('the mouth preset is the model\u2019s own — JawOpen if it has one, else aa',
+        reach.mouthPreset === 'aa' || reach.mouthPreset === 'JawOpen', String(reach.mouthPreset));
+
+  // An emotion quarters the weight, and an emotion waits for the eyes to reopen
+  // before it applies — so this asserts both the weight and the state machine.
+  const set = await page.evaluate(() => window.__vrmcall.emote('happy'));
+  const mooded = await waitFor(() => {
+    const s = window.__vrmcall();
+    return s.emotion === 'happy' && typeof s.mouthExpr === 'number'
+      && Math.abs(s.mouthExpr - s.mouth * 0.25) < 0.02;
+  }, 8000);
+  const mood = await page.evaluate(() => window.__vrmcall());
+  check('an emotion quarters the mouth weight (ChatVRM\u2019s rule)', mooded,
+        `emote()=${set}, emotion=${mood.emotion}, mouth=${mood.mouth} → ${mood.mouthExpr}`);
+
+  await page.evaluate(() => window.__vrmcall.emote('neutral'));
+  const undone = await waitFor(() => {
+    const s = window.__vrmcall();
+    return s.emotion === 'neutral' && typeof s.mouthExpr === 'number'
+      && Math.abs(s.mouthExpr - s.mouth * 0.5) < 0.02;
+  }, 8000);
+  check('back to neutral restores the half weight', undone,
+        JSON.stringify(await page.evaluate(() => ({ e: window.__vrmcall().emotion, x: window.__vrmcall().mouthExpr }))));
 
   // The release is *time*-based (tau = 0.14 s), not frame-based: from a wide
   // open (0.906) the exponential needs ~0.5 s to reach the 0.004 snap. Waiting a

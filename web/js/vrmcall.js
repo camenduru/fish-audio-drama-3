@@ -48,6 +48,9 @@
 
 import { $, el, toast } from './api.js';
 import { createAgentCall } from './agentcall.js';
+// The expression side — lip sync, emotions, blinking — ported from ChatVRM's
+// src/features as one unit. See emote.js for what each piece corresponds to.
+import { EmoteController, attachLookAt } from './emote.js';
 
 // ---------------------------------------------------------------------------
 // Import specifiers. index.html carries an import map pinning these; keeping the
@@ -71,10 +74,6 @@ const DEFAULT_MODEL_URL = '/vrm/AvatarSample_B.vrm';
 const DEFAULT_MODEL_NAME = 'AvatarSample_B.vrm';
 const DEFAULT_IDLE_URL = '/vrm/idle_loop.vrma';
 
-// ChatVRM's blink constants (emoteConstants.ts).
-const BLINK_CLOSE_MAX = 0.12;   // s the eyes stay shut
-const BLINK_OPEN_MAX = 5.0;     // s ceiling between blinks
-const BLINK_OPEN_MIN = 2.0;
 
 const DB_NAME = 'fd3.vrm';
 const DB_STORE = 'models';
@@ -178,14 +177,19 @@ let loading = false;
 
 let call = null;
 let mouthInput = 0;         // 0–1, fed by the call's onLevel
-let mouth = 0;              // smoothed, written to the `aa` expression
-let blinkState = 'open';    // 'open' | 'closed'
-let blinkTimer = 1.5;       // s until the next transition
-let blinkValue = 0;
-let blinks = 0;
+let mouth = 0;              // smoothed mouth value, handed to the emote controller
+let emote = null;           // EmoteController for the current model (mouth, blink, emotion)
 let frames = 0;
 let lastError = null;
 let modelMeta = null;       // { name, size, version, expressions, bones, source }
+let squaredBy = null;       // largest yaw correction applied to this model, in degrees
+let framedTarget = null;    // where the camera looked when the model was framed
+let panTmp = null;          // one reusable vector for the pan clamp
+
+// How far a right-drag pan may walk the orbit target from where framing put it. A
+// pan has no natural limit, and an avatar dragged out of the scene looks exactly
+// like a broken one — with no way back except the Reset camera button.
+const PAN_LIMIT = 1.5;
 
 // --- idle clip (web/vrm/idle_loop.vrma) -------------------------------------
 let vrmaSource = null;      // the parsed VRMAnimation, fetched once
@@ -256,7 +260,17 @@ function makeRenderer() {
   controls = new libs.OrbitControls(camera, canvas);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.enablePan = false;
+  // Left drag orbits, the wheel zooms, and a right-held drag *moves the avatar*:
+  // for an orbit camera, panning is what moving the body in the frame means. It is
+  // screen-space, so dragging right slides the avatar right rather than pushing it
+  // away from the viewer.
+  controls.enablePan = true;
+  controls.screenSpacePanning = true;
+  controls.mouseButtons = {
+    LEFT: THREE.MOUSE.ROTATE,
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: THREE.MOUSE.PAN,
+  };
   controls.minPolarAngle = Math.PI * 0.22;
   controls.maxPolarAngle = Math.PI * 0.62;
   controls.target.set(0, 1.05, 0);
@@ -285,15 +299,41 @@ function frameCamera() {
   const baseY = box.min.y;
   // ChatVRM's framing: fov 30, from the chest up — close enough to read a face,
   // far enough that a talking avatar is not cropped when the head turns.
-  const targetY = baseY + h * 0.74;
+  //
+  // Framed at head level, not full body: this is a talking head shot, and legs cost
+  // you half the pixels that should be going to a face.
+  //
+  // The bounds are *solved*, not guessed, and solved off the rig rather than off
+  // fractions of the model's height. The top is the model's real top (which is hair,
+  // above the head bone — framing off the bone shaves it) plus a little air; the
+  // bottom is just under the neck, so a little shoulder shows. The distance then
+  // follows from what a 30° fov can hold (2·d·tan(15°) ≈ 0.536·d).
+  const neck = vrm.humanoid?.getRawBoneNode?.('neck');
+  const neckY = neck
+    ? neck.getWorldPosition(new THREE.Vector3()).y
+    : baseY + h * 0.72;                      // no neck bone: fall back to a fraction
+  const top = box.max.y + h * 0.02;
+  const bottom = Math.min(neckY - h * 0.07, top - h * 0.2);
+  const span = top - bottom;
+  const targetY = (top + bottom) / 2;
   camera.fov = 30;
-  camera.position.set(0, baseY + h * 0.8, h * 1.02);
+  // A narrow panel crops the sides, and shoulders are wider than a head; back off
+  // instead of cutting them off. (Aspect is only known once the canvas is laid out,
+  // so this is re-applied by Reset camera after a resize.)
+  const narrow = camera.aspect < 1.25 ? Math.min(1.35, 1.25 / Math.max(camera.aspect, 0.85)) : 1;
+  const dist = (span / (2 * Math.tan((camera.fov * Math.PI / 180) / 2))) * narrow;
+  camera.position.set(0, targetY, dist);
   camera.lookAt(0, targetY, 0);
   camera.updateProjectionMatrix();
   controls.target.set(0, targetY, 0);
-  controls.minDistance = h * 0.45;
-  controls.maxDistance = h * 2.6;
+  // Close enough to read the face, far enough out to pull back to the whole body.
+  controls.minDistance = h * 0.35;
+  controls.maxDistance = h * 1.6;
   controls.update();
+  // Remember where framing put the orbit target: the pan clamp measures from here,
+  // and Reset camera puts it back.
+  framedTarget = controls.target.clone();
+  if (!panTmp) panTmp = new libs.THREE.Vector3();
 }
 
 function stopIdle() {
@@ -384,7 +424,10 @@ function disposeModel() {
   }
   vrm = null;
   modelMeta = null;
-  mouth = 0; mouthInput = 0; blinkValue = 0; blinkState = 'open';
+  mouth = 0; mouthInput = 0;
+  // The controller holds expression weights on the *old* model's manager, so it is
+  // dropped with the model rather than left pointing at a disposed one.
+  emote = null;
 }
 
 async function loadModel(arrayBuffer, meta = {}) {
@@ -411,7 +454,12 @@ async function loadModel(arrayBuffer, meta = {}) {
     disposeModel();
     scene.add(next.scene);
     vrm = next;
-    if (vrm.lookAt) vrm.lookAt.target = lookTarget;
+    // autoLookAt.ts, in effect: the eyes converge on a node parented to the camera.
+    attachLookAt(vrm, lookTarget);
+    // Expressions are per-model: the controller owns this model's expression
+    // manager, picks its mouth preset, and carries the blink toggle's setting.
+    emote = new EmoteController(vrm);
+    emote.expressionController.autoBlink?.setEnable(settings.blink);
 
     // The clip drives *this* model's bones, so it is bound here rather than at
     // boot. An idle clip that will not load must not cost the user their avatar:
@@ -424,6 +472,7 @@ async function loadModel(arrayBuffer, meta = {}) {
     }
 
     frameCamera();
+    squaredBy = 0;             // fresh high-water mark for this model
 
     const ex = vrm.expressionManager?.expressions?.length ?? 0;
     const bones = Object.keys(vrm.humanoid?.humanBones || {}).length;
@@ -450,6 +499,75 @@ function boneNode(name) {
   try { return vrm?.humanoid?.getNormalizedBoneNode?.(name) || null; } catch { return null; }
 }
 
+/**
+ * Hold the avatar's face square to the front.
+ *
+ * This pair stands turned: the head's own yaw is ~9.4° off, and the idle clip adds a
+ * little more on top. That reads as the avatar not quite looking at you, because it
+ * isn't — and the gaze does not save it, since the look-at applier only moves the
+ * eyes inside a head that is already facing past your shoulder.
+ *
+ * Measured every frame on the world and cancelled on the model *root*, so the body
+ * keeps its sway, lean and breathing while the facing stays locked. A one-shot fix
+ * at load cannot work: three-vrm has not applied any pose yet at that point, so the
+ * measurement comes back as a flat 0 and the correction silently does nothing.
+ *
+ * Squaring the neck alone would be wrong too — the shoulders would stay turned and
+ * the head would be twisted on them. The correction is capped so a model that
+ * genuinely faces backwards (a VRM0/VRM1 mix-up, which `rotateVRM0` handles) is left
+ * alone rather than spun around.
+ */
+function keepSquareToFront() {
+  const T = libs?.THREE;
+  const head = vrm?.humanoid?.getRawBoneNode?.('head');
+  if (!T || !head || !vrm?.scene) return;
+  const fwd = new T.Vector3(0, 0, 1)
+    .applyQuaternion(head.getWorldQuaternion(new T.Quaternion()));
+  const yawDeg = T.MathUtils.RAD2DEG * Math.atan2(fwd.x, fwd.z);
+  if (Math.abs(yawDeg) > 60) return;          // facing away by design, not a pose
+  // The world yaw contains the root's own rotation, so subtracting it lands on 0 in
+  // one step and cannot stack across frames or model loads.
+  vrm.scene.rotation.y -= T.MathUtils.DEG2RAD * yawDeg;
+  // High-water mark, not the current value: once the lock has settled the per-frame
+  // correction is a hundredth of a degree, which says nothing about whether the
+  // model needed squaring in the first place.
+  squaredBy = Math.max(squaredBy || 0, Math.abs(+yawDeg.toFixed(2)));
+}
+
+/**
+ * How far the avatar's face is turned away from the camera, in degrees: 0 is square
+ * on. Measured on the ground plane between the head's world forward and the line
+ * from the head to the camera, so leaning, nod and the clip's sway do not register
+ * as a turn — only yaw does.
+ */
+function faceGeometry() {
+  const T = libs?.THREE;
+  const head = vrm?.humanoid?.getRawBoneNode?.('head');
+  if (!T || !head || !camera) return null;
+  const p = head.getWorldPosition(new T.Vector3());
+  const fwd = new T.Vector3(0, 0, 1)
+    .applyQuaternion(head.getWorldQuaternion(new T.Quaternion()));
+  const toCam = new T.Vector3().subVectors(camera.position, p);
+  const flat = (v) => { v.y = 0; return v; };
+  if (flat(fwd).lengthSq() < 1e-6 || flat(toCam).lengthSq() < 1e-6) return null;
+  const deg = (r) => +(T.MathUtils.RAD2DEG * r).toFixed(2);
+  return {
+    // 0 = the face is aimed at the camera.
+    yaw: deg(fwd.angleTo(toCam)),
+    // The face's own yaw in the world, independent of where the camera is: this is
+    // the model's rest orientation, and 0 means it faces the front of the scene.
+    headYaw: deg(Math.atan2(fwd.x, fwd.z)),
+    // Where the head and the camera actually are on the ground plane. A head that
+    // is not on the camera's axis reads as a turn even when nothing is turned.
+    headX: +p.x.toFixed(3), headZ: +p.z.toFixed(3),
+    camX: +camera.position.x.toFixed(3), camZ: +camera.position.z.toFixed(3),
+  };
+}
+
+function faceYawDeg() {
+  return faceGeometry()?.yaw ?? null;
+}
+
 /** A normalized bone's local rotation, for the harness snapshot. */
 function quatOf(name) {
   const q = boneNode(name)?.quaternion;
@@ -462,31 +580,23 @@ function updateRig(dt, t) {
   if (!em) return;
 
   // --- lip sync: level -> shaping -> asymmetric smoothing -> `aa` ------------
+  // --- mouth: level → shaping → smoothing → the expression controller ---------
+  // `mouth` is the raw 0–1 value; the controller decides the weight it is drawn
+  // at (0.5 while neutral, 0.25 under an emotion — ChatVRM's own rule) and picks
+  // the preset (`JawOpen` for a perfect-sync model, else `aa`).
   const target = shapeMouth(mouthInput, settings.gain);
   mouth = stepMouth(mouth, target, dt);
   if (mouth < 0.004) mouth = 0;
-  try { em.setValue('aa', mouth); } catch {}
 
-  // --- auto blink ------------------------------------------------------------
-  if (settings.blink) {
-    blinkTimer -= dt;
-    if (blinkTimer <= 0) {
-      if (blinkState === 'open') {
-        blinkState = 'closed';
-        blinkValue = 1;
-        blinks++;
-        blinkTimer = BLINK_CLOSE_MAX;
-      } else {
-        blinkState = 'open';
-        blinkValue = 0;
-        blinkTimer = BLINK_OPEN_MIN + Math.random() * (BLINK_OPEN_MAX - BLINK_OPEN_MIN);
-      }
-    }
-  } else if (blinkState === 'closed') {
-    blinkState = 'open';
-    blinkValue = 0;
+  // --- blink + expressions, in the controller's own order ---------------------
+  // update() runs the blink timer first and applies the mouth weight after, which
+  // is the order ChatVRM's ExpressionController::update uses.
+  if (emote) {
+    emote.lipSync(emote.mouthPreset, mouth);
+    emote.update(dt);
+  } else {
+    try { em.setValue('aa', mouth); } catch {}
   }
-  try { em.setValue('blink', blinkValue); } catch {}
 
   // --- idle: the bundled clip, or the procedural sway if it is unavailable ---
   // The head is left to VRMLookAt, which writes it during vrm.update(); moving it
@@ -520,8 +630,15 @@ function loop() {
     updateRig(dt, clock.elapsedTime);
     mixer?.update(dt);         // the idle clip poses the body ...
     vrm.update(dt);            // ... expressions, humanoid, lookAt, spring bones
+    // After vrm.update: the raw bones hold this frame's pose, and the scene matrix
+    // is rebuilt by the render below, so the correction lands in the same frame.
+    keepSquareToFront();
   }
   controls?.update();
+  if (controls && framedTarget && panTmp
+      && panTmp.copy(controls.target).sub(framedTarget).length() > PAN_LIMIT) {
+    controls.target.copy(framedTarget).add(panTmp.setLength(PAN_LIMIT));
+  }
   // Drawn even with no model, so removing one actually clears the canvas instead
   // of leaving the last frame frozen on screen.
   renderer.render(scene, camera);
@@ -665,7 +782,12 @@ async function ensureStarted() {
 }
 
 function openIfActive() {
-  if ($('#view-vrmcall')?.classList.contains('active')) ensureStarted();
+  if (!$('#view-vrmcall')?.classList.contains('active')) return;
+  ensureStarted();
+  // The agent dropdown is filled at init like the Call page's, but a page opened
+  // after a failed first fetch (or before the server had a key) would otherwise sit
+  // empty until the user happened to focus the select. Opening the page retries.
+  if (!call?.hasAgents()) call?.loadAgents();
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +795,6 @@ export function initVrmCall() {
   // The call is the same object the Live Call page uses, bound to `vrm*` ids.
   call = createAgentCall({
     id: 'vrm',
-    loadOnInit: false,
     storeKey: 'lastAgentVrm',
     tagLabel: 'the message box',
     onLevel: level => { mouthInput = clamp01(level); },
@@ -686,10 +807,15 @@ export function initVrmCall() {
       mouth: +mouth.toFixed(3),
       mouthInput: +mouthInput.toFixed(3),
       // What the VRM itself is holding, so a probe can tell an internal number
-      // from the value that actually reaches the avatar.
-      aaExpr: vrm?.expressionManager?.getExpression?.('aa')?.weight ?? null,
-      blinkExpr: vrm?.expressionManager?.getExpression?.('blink')?.weight ?? null,
-      blinks,
+      // from the value that actually reaches the avatar. `mouthExpr` is the weight
+      // the controller actually wrote, which is `mouth` scaled by the emotion —
+      // reading the preset back proves the scaling happened, not just the maths.
+      aaExpr: emote?.mouthWeight ?? null,
+      mouthExpr: emote?.mouthWeight ?? null,
+      mouthPreset: emote?.mouthPreset ?? null,
+      emotion: emote?.emotion ?? null,
+      blinkExpr: emote?.blinkWeight ?? null,
+      blinks: emote?.blinkCount ?? 0,
       frames,
       loadingModel: loading,
       triangles: renderer?.info?.render?.triangles ?? 0,
@@ -707,6 +833,11 @@ export function initVrmCall() {
       // converging — the applier writes the eyes and nothing else.
       head: quatOf('head'),
       chest: quatOf('chest'),
+      // 0° means the face is square to the camera — the number to watch when a
+      // model (or its idle clip) leaves the avatar standing slightly turned.
+      faceYaw: faceYawDeg(),
+      face: faceGeometry(),
+      squaredBy: squaredBy,
       eye: quatOf('leftEye'),
       eyeRaw: (() => {
         const q = vrm?.humanoid?.getRawBoneNode?.('leftEye')?.quaternion;
@@ -723,6 +854,20 @@ export function initVrmCall() {
   // the exact wire the call uses, so the mouth path can be verified end to end
   // (and it is the only way to see the mouth move without a live call).
   window.__vrmcall.feed = level => { mouthInput = clamp01(Number(level) || 0); return +mouth.toFixed(3); };
+
+  // The same seam for the expression side. The agent transport carries no emotion
+  // — ChatVRM reads one out of an LLM screenplay field, and the Fish agent runtime
+  // exposes no equivalent — so an emotion can only be set from here or from code
+  // that already knows the mood. It is not decoration: the mouth weight depends on
+  // it, which is what makes it worth being able to drive.
+  window.__vrmcall.emote = preset => {
+    emote?.playEmotion(preset || 'neutral');
+    return emote?.emotion ?? null;
+  };
+
+  // And the transcript, for the same reason: the order it lays turns out in is a
+  // contract (newest on top), and no probe can start a call to observe it.
+  window.__vrmcall.bubble = (role, text, id) => call?.bubble?.(role, text, id) ?? null;
 
   // ---- model intake --------------------------------------------------------
   for (const id of ['vrmPick', 'vrmPick2']) {
@@ -771,14 +916,19 @@ export function initVrmCall() {
     const lbl = $('#vrmGainVal'); if (lbl) lbl.textContent = settings.gain.toFixed(2) + '×';
   });
   const blink = $('#vrmBlink');
-  blink?.addEventListener('change', () => { settings.blink = blink.checked; if (!blink.checked) blinkTimer = 0; });
+  blink?.addEventListener('change', () => {
+    settings.blink = blink.checked;
+    // ChatVRM's setEnable: turning auto-blink off leaves the eyes open (and lets a
+    // closed lid finish its 0.12 s first).
+    emote?.expressionController.autoBlink?.setEnable(settings.blink);
+  });
   const idle = $('#vrmIdle');
   idle?.addEventListener('change', () => {
     settings.idle = idle.checked;
     if (idleAction) idleAction.paused = !settings.idle;
   });
   $('#vrmResetCam')?.addEventListener('click', () => { if (vrm) frameCamera(); });
-  $('#vrmBlinkNow')?.addEventListener('click', () => { blinkState = 'closed'; blinkValue = 1; blinkTimer = BLINK_CLOSE_MAX; blinks++; });
+  $('#vrmBlinkNow')?.addEventListener('click', () => emote?.blinkNow());
 
   // Opening the page is what pulls in three.js and the last model.
   const viewEl = $('#view-vrmcall');

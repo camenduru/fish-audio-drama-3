@@ -235,12 +235,19 @@ export function createAgentCall({
     const chat = q('Chat');
     if (!chat) return null;
     let b = bid ? chat.querySelector(`[data-id="${bid}"]`) : null;
-    if (!b) {
+    const fresh = !b;
+    if (fresh) {
       b = el('div.bubble.' + role, { dataset: bid ? { id: bid } : {} });
-      chat.append(b);
+      // Newest first: the newest turn goes on top, so the line you are waiting for
+      // is the one you are already looking at. (Appending put it at the bottom of
+      // a transcript that only grows, which is off-screen as soon as it matters.)
+      chat.prepend(b);
     }
     b.textContent = text;
-    b.scrollIntoView({ block: 'end', behavior: 'smooth' });
+    // Only a new turn moves the scroll. Scrolling on every update would yank the
+    // list back while the user is reading history, and a streaming partial would
+    // fight them several times a second.
+    if (fresh) chat.scrollTop = 0;
     return b;
   }
 
@@ -546,6 +553,9 @@ export function createAgentCall({
   return {
     init,
     loadAgents,
+    // One transcript line, for pages that have something to say outside the call
+    // (and for the harness, which cannot start a call to get one).
+    bubble,
     start,
     end,
     snapshot,

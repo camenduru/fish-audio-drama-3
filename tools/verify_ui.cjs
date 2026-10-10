@@ -29,6 +29,20 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   await page.goto(BASE + '/#studio', { waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(r => setTimeout(r, 900));
 
+  // 0. The chrome is the app's mark, not an emoji placeholder: a drawn SVG in the
+  // rail and a matching SVG favicon (a theatre-mask emoji used to stand in for both).
+  const chrome = await page.evaluate(() => ({
+    logo: document.querySelector('.rail .logo')?.querySelector('svg') ? document.querySelector('.rail .logo svg').querySelectorAll('path, circle').length : 0,
+    logoText: (document.querySelector('.rail .logo')?.textContent || '').trim(),
+    icon: document.querySelector('link[rel="icon"]')?.getAttribute('href') || '',
+  }));
+  check('chrome: the rail logo is a drawn mark, not an emoji',
+        chrome.logo >= 2 && chrome.logoText === '',
+        `${chrome.logo} shapes, text "${chrome.logoText}"`);
+  check('chrome: the favicon matches it',
+        chrome.icon.startsWith('data:image/svg+xml') && chrome.icon.includes('<svg')
+        && !/[\u{1F000}-\u{1FAFF}]/u.test(chrome.icon), chrome.icon.slice(0, 46) + '…');
+
   // 1. Studio renders
   check('studio: rail + editor present', await page.$('#editor') !== null);
   const tagChips = await page.$$eval('#tagbar .tag-chip', els => els.length);

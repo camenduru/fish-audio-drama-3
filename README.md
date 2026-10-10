@@ -343,12 +343,74 @@ What the avatar does, and where it comes from (`web/js/vrmcall.js`):
 | | |
 | --- | --- |
 | viewer | three.js + `@pixiv/three-vrm` through `GLTFLoader` + `VRMLoaderPlugin`, `rotateVRM0`, then `vrm.update(delta)` every frame — ChatVRM's load path |
-| lip sync | the SDK's output level (`getOutputVolume()`, with `getOutputFrequencyData()` as a floor), shaped by a gamma, then an asymmetric smoother (fast attack, slower release) into the VRM `aa` expression — only `aa`, as ChatVRM does |
-| blink | auto-blink on the `blink` expression; shut for ~0.12 s, then reopened after 2–5 s (ChatVRM's `BLINK_CLOSE_MAX` / `BLINK_OPEN_MAX`) |
+| lip sync | the SDK's output level (`getOutputVolume()`, with `getOutputFrequencyData()` as a floor), shaped by a gamma, then an asymmetric smoother (fast attack, slower release), handed to the emote controller |
+| mouth preset | whatever the model has: `JawOpen` when it is a perfect-sync model, otherwise `aa` — ChatVRM's own preference order |
+| mouth weight | the value is *not* written raw: half of it while the emotion is neutral, a quarter under an emotion (`0.5` / `0.25`, ChatVRM's `ExpressionController::update`). The mouth-gain fader is what compensates |
+| emotions | one at a time, the previous one zeroed on the way out; an emotion waits out the blink it interrupted, because applying an expression over closed eyelids reads as a glitch |
+| blink | auto-blink on the `blink` expression via ChatVRM's `AutoBlink`; shut for `BLINK_CLOSE_MAX` (0.12 s), open for `BLINK_OPEN_MAX` (5 s) |
 | look-at | an `Object3D` parented to the camera becomes `vrm.lookAt.target`, so the eyes converge on you and keep following while you orbit |
 | idle | the bundled `.vrma` on a `THREE.AnimationMixer`, rebuilt for whichever model is loaded. If it cannot be fetched or parsed the rig falls back to the procedural chest sway it used before, so the page never sits stone still |
+| framing | a head shot on open — cropped below the shoulders, not head to toe, because legs and hips cost you the pixels that should be going to a face |
+| facing | held square to the camera: this model stands ~9.4° turned in its rest pose and the idle clip adds a little on top, so the yaw is measured on the world every frame and cancelled on the model root |
+| camera | left drag orbits, the wheel zooms, a **right-held drag moves the avatar** (screen-space pan). Panning is clamped to 1.5 m from where framing put the target — an avatar dragged out of the scene looks exactly like a broken one |
 
 Nothing is pre-rendered, so the mouth stops when the agent stops.
+
+#### The expression side is ChatVRM's, ported as a unit
+
+`web/js/emote.js` carries the whole emote feature set from ChatVRM's
+`src/features`, because the files there only mean anything together and splitting
+them invites the half-port that gets the interaction wrong:
+
+| ChatVRM | here |
+| --- | --- |
+| `lipSync/lipSync.ts` | `cookVolume()` + `LipSync` — peak of the time-domain data, the sigmoid `1/(1+exp(-45v+5))`, and the `0.1` floor that makes silence a shut mouth |
+| `emoteController/emoteController.ts` | `EmoteController` |
+| `emoteController/expressionController.ts` | `ExpressionController` — the emotion / mouth / blink state machine and the `0.5` / `0.25` weights |
+| `emoteController/autoBlink.ts` | `AutoBlink` — two timers, and `setEnable()` returning the seconds until the eyes reopen |
+| `emoteController/autoLookAt.ts` | `attachLookAt()` |
+| `emoteController/emoteConstants.ts` | `BLINK_CLOSE_MAX` / `BLINK_OPEN_MAX` |
+
+What a half-port gets wrong is the interaction. The mouth weight depends on whether
+an emotion is showing, and an emotion lands only after the eyes have reopened —
+both live in the controller rather than in the render loop, which is why the harness
+can assert them (neutral → `mouth × 0.5`, `emote('happy')` → `mouth × 0.25`,
+`emote('neutral')` → back to `0.5`).
+
+The one deliberate difference is where the level comes from. ChatVRM analyses its
+own `AudioContext` because it plays its TTS buffers itself; this studio's audio
+arrives from the agent SDK, which hands out a 0–1 output level rather than samples,
+so that level is what feeds the controller. `cookVolume()` is kept exactly as
+ChatVRM wrote it for anyone who *does* have samples, and the level path is modelled
+on the same idea — a curve that lifts quiet speech, then a floor.
+
+> The agent transport carries no emotion. ChatVRM reads one out of an LLM
+> screenplay field and the Fish agent runtime exposes no equivalent, so an emotion
+> can only be set in code or from the harness — `window.__vrmcall.emote('happy')`.
+> That is why the weight rule is worth testing: nothing else would exercise it.
+
+The facing is held square rather than corrected once. `AvatarSample_B` stands ~9.4°
+turned and its idle clip turns it a little further, which reads as an avatar looking
+over your shoulder — and the gaze does not save it, because the look-at applier only
+moves the eyes inside a head that is already aimed past you. The fix is a per-frame
+measurement of the head's world yaw, cancelled on the model *root*: the body keeps
+its sway, lean and breathing while the facing stays locked. Two things make the
+obvious versions wrong — squaring the *neck* leaves the shoulders turned and the
+head twisted on them, and a one-shot correction at load does nothing at all, because
+three-vrm has applied no pose at that point and the measurement comes back a flat
+`0`. The correction is capped at 60°, so a model facing backwards (a VRM0/VRM1
+mix-up, which `rotateVRM0` handles) is left alone instead of being spun around.
+
+Framing is solved rather than guessed, and solved off the rig. The top of the
+opening shot is the model's real top plus a little air; the bottom is just under the
+*neck bone*, so a sliver of shoulder shows; the distance follows from what a 30° fov
+can hold at that span. Framing off a fraction of the model's height is how the top
+of the hair gets shaved off — the head *bone* sits below the highest vertex, so
+anything centred on the head crops the hair above it. The probe reads the canvas
+rather than the numbers: the silhouette must clear the top edge (nothing cropped
+up there) *and* run off the bottom edge, which is what makes it a head shot instead
+of a torso or full-body one that merely looks tight. This is also what **Reset
+camera** and the opening view both use, so they cannot drift apart.
 
 #### Bundled avatar and idle clip
 
@@ -398,6 +460,19 @@ after play. The offset is subtracted from the track instead, which keeps the swa
   re-picked after a reload. The bundled avatar is deliberately *not* cached — it
   is already on disk. **✕ Remove** drops your model and brings the bundled one
   back, so the stage is never left blank.
+- **The avatar never scrolls away.** The stage is pinned to the top of the page's
+  own column and the transcript scrolls *inside* its box under it; sharing one
+  scroller carried the avatar off the top of the page the moment a conversation got
+  long enough to read. Only a very short window falls back to scrolling the column.
+- **The transcript reads newest-first.** Appending put each turn at the bottom of a
+  list that only grows, so the line you were waiting for arrived off-screen; new
+  turns now go on top, and only a *new* turn moves the scroll, so a streaming
+  partial cannot yank you out of what you were reading.
+- **The agent list loads here too.** This page used to be created with
+  `loadOnInit: false` and never filled, so its dropdown stayed empty until you
+  happened to focus it — which looked like "agents are not loading on this page".
+  Opening the page also retries, for a first fetch that failed before the server
+  had a key.
 - **Mouth gain** is a per-model fader — VRM `aa` shapes differ a lot in how far
   they open.
 - The call itself (mic, errors, text-only fallback) behaves exactly as on the
@@ -447,6 +522,7 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/agentcall.js   the call lifecycle both call pages share
   js/livecall.js    the Live Call page (binds agentcall to the live* ids)
   js/vrmcall.js     the VRM Call page: a three.js/three-vrm avatar whose mouth the call drives
+  js/emote.js       ChatVRM's expression side — lip sync, emotions, blinking, look-at
   vrm/              the bundled default avatar + idle clip (6.9 MB, served by the studio)
 tools/visemes.py    the Fish-anchored viseme baker (openfacefx + allosaurus)
 tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
@@ -547,19 +623,25 @@ releases its session.
 `probe_vrm.cjs` is the avatar's harness, and its baseline takes no arguments — a
 fresh browser profile has an empty IndexedDB, so it is checking exactly what a
 first visit sees. It asserts the bundled avatar loads with no file picker, that
-the idle clip is bound *and advancing* (a bound mixer whose clock is stopped would
-otherwise pass) and that it poses the body, that the clip's absolute hip offset
-was removed, that the gaze still converges on the camera while the clip plays
-(read by orbiting with a real drag, since the look-at target is parented to it),
-that no track binds this clip's head, and that **✕ Remove** restores the bundled
-avatar. Pass a `.vrm` and it additionally loads it through the **real file
-picker**, waits for the *uploaded* model by name rather than `model.loaded` (the
-default is already loaded, so that alone would pass too early), and checks the
-clip is rebuilt for it — then asserts the metadata parsed, the render loop is
-drawing (`triangles > 0`), a level down the same wire the call's `onLevel` writes
-reaches the VRM `aa` expression and closes again in silence, an auto-blink fires,
-and the Live Call page is unharmed. No API key and no credit: a call cannot be
-started headlessly without a microphone and an agent, so the level is injected
-through `window.__vrmcall.feed()` — everything downstream of that point is the
-shipped path. On a machine without a GPU (a VM or CI box), pass software WebGL:
+the agent dropdown is populated on *this* page and matches the Call page's, that
+the transcript scrolls on its own with the newest turn on top and does not scroll
+you into history, that a right-held drag actually moves the avatar (measured off
+the canvas pixels — "the camera panned" and "the avatar moved" are not the same
+claim), that the idle clip is bound *and advancing* (a bound mixer whose clock is
+stopped would otherwise pass) and that it poses the body, that the clip's absolute
+hip offset was removed, that the gaze still converges on the camera while the clip
+plays (read by orbiting with a real drag, since the look-at target is parented to
+it), that no track binds this clip's head, that the emote controller applies
+ChatVRM's weights (neutral `×0.5`, an emotion `×0.25`, back to `×0.5` on neutral),
+and that **✕ Remove** restores the bundled avatar. Pass a `.vrm` and it
+additionally loads it through the **real file picker**, waits for the *uploaded*
+model by name rather than `model.loaded` (the default is already loaded, so that
+alone would pass too early), and checks the clip is rebuilt for it — then asserts
+the metadata parsed, the render loop is drawing (`triangles > 0`), a level down the
+same wire the call's `onLevel` writes reaches the mouth expression and closes
+again in silence, an auto-blink fires, and the Live Call page is unharmed. No API
+key and no credit: a call cannot be started headlessly without a microphone and an
+agent, so the level is injected through `window.__vrmcall.feed()` — everything
+downstream of that point is the shipped path. On a machine without a GPU (a VM or
+CI box), pass software WebGL:
 `CHROME_ARGS="--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader"`.
