@@ -23,6 +23,8 @@
   --blue:      #6ba8ff;
   --radius:    10px;
   --radius-sm: 7px;
+  /* The rail's width, defined once: .rail sizes itself from it. */
+  --rail-w:    74px;
   --shadow:    0 10px 40px rgba(0,0,0,.45);
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
@@ -49,7 +51,7 @@ a:hover { text-decoration: underline; }
 #app { display: flex; height: 100vh; }
 
 .rail {
-  width: 74px; flex: 0 0 74px;
+  width: var(--rail-w); flex: 0 0 var(--rail-w);
   background: var(--bg-2);
   border-right: 1px solid var(--line);
   display: flex; flex-direction: column; align-items: center;
@@ -496,16 +498,11 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .cv-turn .btn { padding: 1px 5px; font-size: 11px; }
 
 /* ==========================================================================
-   Complex tag library — the picker and its floating opener
-   ========================================================================== */
-.tag-fab {
-  position: fixed; left: 18px; bottom: 18px; z-index: 150;
-  width: 44px; height: 44px; border-radius: 50%; cursor: pointer;
-  border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text-2);
-  font-size: 18px; line-height: 1; box-shadow: var(--shadow); transition: .14s;
-}
-.tag-fab:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-2px); }
-.tag-fab:active { transform: translateY(0); }
+   Complex tag library — the picker
+   ==========================================================================
+   Its opener is #tagFab in the top bar, beside the key and model badges. It
+   used to float at the window's bottom-left corner as a .tag-fab, which put it
+   over the last rail item: the centre of Settings opened the tag library. */
 
 /* --- toolbar above the categories --- */
 .tag-tools { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 12px; }
