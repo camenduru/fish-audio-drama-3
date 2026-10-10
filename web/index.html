@@ -31,7 +31,7 @@
           stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
       </svg>
     </div>
-    <button class="rail-btn active" data-view="studio">
+    <button class="rail-btn" data-view="studio">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h10M4 17h13"/></svg>
       Studio
     </button>
@@ -64,7 +64,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></svg>
       Call
     </button>
-    <button class="rail-btn" data-view="vrmcall">
+    <button class="rail-btn active" data-view="vrmcall">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M5.5 21v-1.5a6.5 6.5 0 0 1 13 0V21"/><path d="M9.5 13.2 12 17.5l2.5-4.3"/></svg>
       VRM Call
     </button>
@@ -77,15 +77,15 @@
   <!-- ============ MAIN ============ -->
   <div class="main">
     <header class="topbar">
-      <h1 id="viewTitle">Drama 3 Studio</h1>
-      <span class="sub" id="viewSub">Direct a performance in plain language</span>
+      <h1 id="viewTitle">VRM Call</h1>
+      <span class="sub" id="viewSub">Give the agent a VRM body and talk to it</span>
       <div class="grow"></div>
       <span class="badge" id="keyBadge">…</span>
       <span class="badge accent" id="modelBadge">drama-3-preview</span>
     </header>
 
     <!-- ---------- STUDIO ---------- -->
-    <section class="view active" id="view-studio">
+    <section class="view" id="view-studio">
       <div class="studio">
         <div class="studio-main">
           <div class="tagbar" id="tagbar"></div>
@@ -522,7 +522,7 @@
     </section>
 
     <!-- ---------- VRM CALL ---------- -->
-    <section class="view" id="view-vrmcall">
+    <section class="view active" id="view-vrmcall">
       <div class="studio">
         <div class="studio-main">
           <div class="pad flex aic gap" style="border-bottom:1px solid var(--line);flex-wrap:wrap">

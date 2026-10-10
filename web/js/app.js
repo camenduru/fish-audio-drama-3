@@ -129,7 +129,9 @@ function boot() {
   initVrmCall();
   initTagPicker();
 
-  route(location.hash.slice(1) || 'studio');
+  // The avatar is the front door: an empty hash lands on VRM Call, and any
+  // other page is still reachable by its own hash or the rail.
+  route(location.hash.slice(1) || 'vrmcall');
   refreshStatus();
   console.log('%c🎭 Fish Audio Drama 3 Studio', 'font-size:14px;color:#ff7a59;font-weight:bold');
 }
