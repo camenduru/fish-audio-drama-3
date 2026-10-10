@@ -1,0 +1,36 @@
+# ---- secrets ---------------------------------------------------------------
+# .env holds FISH_API_KEY. Never commit it; copy .env.example instead.
+.env
+.env.*
+!.env.example
+
+# ---- python ----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- node ------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# ---- local scratch ---------------------------------------------------------
+# Probe captures, baked sidecars, takes and presets written while running.
+# The server recreates this directory on startup, so nothing here is needed.
+data/
+
+# ---- editors / OS ----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
