@@ -128,6 +128,22 @@ function loadExample(name) {
   detectSpeakers();
 }
 
+/**
+ * Load a whole scene from elsewhere in the app (the Examples page).
+ *
+ * Replaces the cast rather than adding to it: a different scene means different
+ * characters, and leaving the previous scene's speakers in place meant the cards
+ * piled up — load four examples and you had eight speakers, only four of which
+ * appear in the script you are about to render.
+ */
+export function loadSceneScript(text) {
+  const ta = $('#sceneScript');
+  if (!ta) return;
+  ta.value = text;
+  scene.speakers = [];
+  detectSpeakers();
+}
+
 function buildExamples() {
   const box = $('#sceneExamples');
   box.replaceChildren(...Object.keys(D3.SCENE_EXAMPLES).map(name =>
@@ -154,6 +170,21 @@ export function initScenes() {
   $('#sceneAddSpeaker').addEventListener('click', () => { scene.speakers.push({ name: '', voiceId: '', file: null }); render(); });
   $('#sceneRender').addEventListener('click', renderScene);
   $('#sceneParse').addEventListener('click', detectSpeakers);
+
+  // Keep the speaker cards in step with the script as it is typed — and, more
+  // importantly, when a scene is loaded from the Examples page, which sets the
+  // textarea programmatically and fires `input`. Without this the cards kept
+  // showing the previous scene's cast, so a four-hander would render with two
+  // voices. detectSpeakers() only adds unknown names, so editing a line never
+  // throws away a voice already assigned to a speaker.
+  const scriptEl = $('#sceneScript');
+  if (scriptEl) {
+    let pending = null;
+    scriptEl.addEventListener('input', () => {
+      clearTimeout(pending);
+      pending = setTimeout(detectSpeakers, 250);
+    });
+  }
 
   buildExamples();
   render();

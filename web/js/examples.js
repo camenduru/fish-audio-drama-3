@@ -3,6 +3,7 @@
 import { $, el, toast, esc } from './api.js';
 import { highlight } from './drama3.js';
 import { setScript, generate } from './studio.js';
+import { loadSceneScript } from './scenes.js';
 
 export const FEATURES = [
   {
@@ -87,6 +88,77 @@ export const FEATURES = [
       { script: `Detective: You were there that night.\nSuspect: I was home. Asleep.\nDetective: Then why is your coat still wet?`, note: 'Press “Auto Tag” in the studio and Drama 3 suggests the directions for you.' },
     ],
   },
+  {
+    n: '10', icon: '🧩', title: 'Stack it all in one line',
+    blurb: 'The features are designed to compose. Every line here carries a direction, a sound tag and a scoped span at once — and some change mood partway through. This is the shape most real lines end up taking. One caveat: a bare [pause] can run anywhere from a beat to a dozen seconds, so [short pause] is steadier when the timing matters.',
+    items: [
+      {
+        script: `[calm, professional narrator] In 1969, [pause] a single engineer <slower>rewired everything.</slower> [breath] The rest, as they say, is history.`,
+        note: 'Direction + pause + scoped slowdown + a breath. Four features, one sentence, no seams.',
+      },
+      {
+        script: `[deadpan, utterly serious] Our sponsor today is <emphasis>Nordwind</emphasis> — [pause] yes, [laugh] the knife people.`,
+        note: 'Deadpan direction, a weighted brand name, then a pause and a laugh that undercut it.',
+      },
+      {
+        script: `[gently, reading a bedtime story] The little fox <whisper>crept past the sleeping giant</whisper>, [pause] and <slower>never once looked back.</slower>`,
+        note: 'A whispered span inside a calm read — the volume drops and comes back without a new take.',
+      },
+      {
+        script: `[barely holding it together] I said <|phoneme_start|>R EH1 D<|phoneme_end|> the letter — [pause] <whisper>I never read it out loud.</whisper>`,
+        note: 'A phoneme fixes the past-tense “read”, then the line drops to a whisper. Note “read” appears twice, said two different ways.',
+      },
+      {
+        script: `[suddenly furious] <forceful>Get out.</forceful> [pause] [breath] [whispering, broken] <whisper>Please. Just go.</whisper>`,
+        note: 'Anger, then a break: forceful → pause → breath → a second direction → whisper. The hardest thing to fake, and it happens inside one line. This one measured 11.8 s on a test run — the pause is doing that, so shorten it if you want a tighter beat.',
+      },
+    ],
+  },
+  {
+    n: '11', icon: '🎬', title: 'Full scenes, longer casts',
+    blurb: 'Four speakers, nine turns, and Drama 3 keeps each one in character across the whole exchange — including who interrupts whom. Each speaker gets its own voice in the Scenes tab. Pauses carry a lot of the timing here; if a beat drags, swap [pause] for [short pause].',
+    scene: true,
+    items: [
+      {
+        script: `Vex: [clipped, all business] We have ninety seconds. In and out.\nMarla: [chewing gum, unbothered] Relax. I've done this a hundred times.\nVex: [flat] You've done it twice.\nMarla: [pause] ...Ninety-one seconds.\nNova: [over the radio, distorted] Guys? The door's already open.\nVex: [very slowly] Say that again.\nNova: [small voice] The door. It's already open.\nDex: [from the van, delighted] I told you the keycard was a bad idea.\nVex: [pause] Everyone. Stop talking.`,
+        note: 'Four speakers in a heist briefing — one of them on a radio, one in the van. The comedy is in the pauses: Marla conceding, Vex slowing right down.',
+      },
+      {
+        script: `Dad: [too cheerful] So. Anyone want to explain the car?\nTeen: [mouth full] Nope.\nMom: [not looking up] The car is fine.\nDad: [pause] The car is in the kitchen.\nTeen: [pause] Okay, so, technically —\nMom: [cutting in, dangerously calm] <emphasis>Finish your vegetables.</emphasis>`,
+        note: 'Three speakers, and the last line is an interruption — a direction plus a scoped span, landing the punchline.',
+      },
+      {
+        script: `Narrator: [low, documentary] The lighthouse had been dark for eleven years.\nKeeper: [distant, over static] Is anyone receiving? [pause] Please.\nNarrator: [pause] That was the first transmission.\nOperator: [startled] Sir — you need to hear this.\nKeeper: [closer now, urgent] It's not a lighthouse. [pause] It never was.`,
+        note: 'A radio drama where the same speaker moves closer over the scene — the direction tracks the distance.',
+      },
+      {
+        script: `Detective: [measured, serious] Let's go back to the fourteenth.\nSuspect: [trying to stay calm] I've told you. I was home.\nDetective: [pause] You were home.\nSuspect: [defensive, slightly uneasy tone] Yes.\nDetective: [quietly] Then why does your neighbour say she saw your car?\nSuspect: [pause] [voice dropping] ...She's mistaken.\nDetective: [gently questioning] She wrote down the plate.\nSuspect: [breaking] <whisper>I want to call my lawyer.</whisper>`,
+        note: 'Eight turns of an interrogation that ends on a whispered collapse. A two-hander with real escalation.',
+      },
+    ],
+  },
+  {
+    n: '12', icon: '📖', title: 'Long-form narration',
+    blurb: 'One voice, many turns. These are the lines where a single speaker has to carry a whole arc, and where a mid-line direction change does the heavy lifting. A bare [pause] is dramatic but its length swings a lot between takes — [short pause] is steadier when the timing matters.',
+    items: [
+      {
+        script: `[calm narration] The house on Alder Lane had stood empty for as long as anyone could remember. [pause] <slower>Almost anyone.</slower> [breath] Because Mrs Pell remembered. [quietly, almost to himself] She remembered <emphasis>everything.</emphasis>`,
+        note: 'An audiobook opening that turns on three words. The direction changes twice mid-paragraph.',
+      },
+      {
+        script: `[measured, serious] In the spring of 1986, [pause] a reactor in the north began to hum. [suddenly intense] Not loudly — <faster>that was the problem.</faster> [pause] [quietly, holding back] By morning the town was gone.`,
+        note: 'Documentary register that snaps to alarm, speeds up for the key clause, then drops away entirely.',
+      },
+      {
+        script: `[warm and conversational] Okay, so — [pause] this is the part where I'm supposed to say it gets easier. [laugh] It doesn't. [lowering her voice] On the night of the fourteenth, [breath] three people drove out to the lake. [pause] Only two came back.`,
+        note: 'Podcast cadence: chatty, self-aware, then quiet. The laugh is what makes the turn land.',
+      },
+      {
+        script: `[bright and confident] Meet Nordwind — [pause] the last knife you'll ever buy. [genuinely excited] Forged, folded, and <emphasis>absurdly</emphasis> sharp. [conspiratorial whisper] <whisper>Don't tell my landlord.</whisper>`,
+        note: 'An ad read that ends somewhere the brand did not plan for. Direction, emphasis and whisper in three beats.',
+      },
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -96,8 +168,7 @@ function exampleCard(item, feature) {
   const load = el('button.btn.sm.primary', { onclick: () => {
     if (feature.scene) {
       document.querySelector('[data-view="scenes"]').click();
-      const ta = $('#sceneScript');
-      if (ta) { ta.value = item.script; ta.dispatchEvent(new Event('input')); }
+      loadSceneScript(item.script);
       toast('Loaded into Scenes.');
     } else {
       document.querySelector('[data-view="studio"]').click();
@@ -108,7 +179,7 @@ function exampleCard(item, feature) {
   } }, feature.scene ? 'Open in Scenes →' : 'Load into studio →');
 
   const hear = el('button.btn.sm', { title: 'Load and synthesize (needs API credit)', onclick: async () => {
-    if (feature.scene) { document.querySelector('[data-view="scenes"]').click(); const ta = $('#sceneScript'); if (ta) ta.value = item.script; toast('Press “Render scene”.'); return; }
+    if (feature.scene) { document.querySelector('[data-view="scenes"]').click(); loadSceneScript(item.script); toast('Press “Render scene”.'); return; }
     document.querySelector('[data-view="studio"]').click();
     setScript(item.script);
     await generate();

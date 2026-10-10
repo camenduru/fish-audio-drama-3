@@ -103,7 +103,12 @@ NPC's real face atlas.
   blink machine. Only the avatar whose audio is actually rolling drives its
   mouth: the other rests closed. (Driving a paused avatar from its sidecar would
   freeze it on `cueAt(sidecar, 0)` — the first viseme of a line it isn't saying —
-  so a two-hander looked like both mouths hanging open at once.)
+  so a two-hander looked like both mouths hanging open at once.) The preview
+  applies the game's own mouth timing on top: a shape must have been on screen
+  for `avatar.voice.mouth_min_hold` (0.05 s) before it may change, and the clock
+  is shifted back by `avatar.visemes.latency_seconds` so the mouth never leads
+  the voice — the same two rules as `DialogueAvatar::UpdateMouth` and
+  `AudioSystem::CurrentVoiceSeconds`.
 - **Conversation script** — write the whole exchange in one box, one turn per
   line:
 
@@ -125,6 +130,47 @@ NPC's real face atlas.
 - **Export** — `⬇ Both` writes the matched `.wav` + `.visemes.json` pair under
   `assets/audio/speech/en/33/`, ready to drop into the game.
 
+#### The baker is byte-identical to the game's
+
+`tools/visemes.py` here is a *different* baker from the game's
+`tools/gen_visemes.py` — it can pin the aligner to Fish's word timings instead of
+recovering them with an ASR — but it must emit a sidecar the game reads
+*identically*, or the preview lies about what ships. It does, and that is
+checked rather than assumed:
+
+```bash
+python tools/compare_bakers.py --endpoint http://127.0.0.1:8756
+```
+
+runs both bakers over the same WAV and diffs the cue timelines. It has three
+parts, and all three matter:
+
+- **Parity** — game vs studio, speech guard **off**, with and without `--text`:
+  **identical cue timeline** (59/59 on the shipped `33_33000.wav`, values and
+  timings matching to the millisecond). This is the shipping claim.
+- **The guard is real** — the studio has an opt-in `--speech-guard` that
+  re-opens the mouth inside a word Fish reports as spoken (recovering soft
+  onsets the energy gate reads as silence). It needs Fish anchors, so without
+  them the flag is *inert* — and a naive harness would happily report a
+  meaningless "identical" for guard=on. This part asserts the flag is inert
+  without anchors **and** that it changes the output once anchors exist, so the
+  divergence is opt-in and cannot quietly become the default.
+- **The shipped HTTP path** — `POST /api/visemes` and diff *that* against the
+  game. The module agreeing is not enough; the flags the server actually passes
+  are what ships.
+
+Every sidecar either baker emits is also run through the game's own
+`tools/check_viseme_assets.py::check_sidecar`, so "the game will load this" is
+verified, not assumed. Run it after touching either baker.
+
+The parity work is three specific things, all of which used to differ:
+
+| | the studio used to | now |
+|---|---|---|
+| **gap filling** | pad the timeline out to `duration` and fill gaps with X | sort/clamp/merge only — `VisemeTrack::Sample` returns `'X'` outside a cue, so a gap and an explicit X cue render identically |
+| **short cues** | drop any cue under 30 ms | keep them — the game *holds* a shape for `avatar.voice.mouth_min_hold` (0.05 s), so a 20 ms cue is a shape the game draws for 50 ms |
+| **speech guard** | always on | opt-in via `--speech-guard`; the default path matches the game |
+
 **Adding an avatar** is dropping a folder into the game — no code change here.
 `assets/dialogue/<npc>/` needs:
 
@@ -139,11 +185,28 @@ NPC's real face atlas.
 (path-traversal guarded), so the preview can never drift from the source.
 
 ### Examples (`examples`)
-**Every Drama 3 feature from the Voice Guide, with the exact scripts** — 9
-features, 26 runnable examples. Each card is syntax-highlighted and has
+**Every Drama 3 feature from the Voice Guide, with the exact scripts** — 12
+features, 39 runnable examples. Each card is syntax-highlighted and has
 **Load into studio** (or **Open in Scenes** for dialogue), **▶ Hear it**
-(load + synthesize), and copy. The sidebar carries a jump-nav to the nine
+(load + synthesize), and copy. The sidebar carries a jump-nav to the twelve
 features and a full tag reference.
+
+The first nine blocks teach one feature each. The last three are deliberately
+**complex**, because the features are meant to compose and a one-line demo never
+shows that:
+
+- **10 · Stack it all in one line** — a direction, a sound tag, a scoped span and
+  a mid-line mood change in a single sentence, up to
+  `[suddenly furious] <forceful>Get out.</forceful> [pause] [breath] [whispering, broken] <whisper>Please. Just go.</whisper>`
+- **11 · Full scenes, longer casts** — four scenes from three to four speakers,
+  up to nine turns, including an interrogation that escalates and a radio drama
+  where the direction tracks a voice getting closer. These also appear in the
+  Scenes tab's preset list.
+- **12 · Long-form narration** — single-voice arcs where the direction changes
+  two or three times inside one paragraph.
+
+`verify_ui.cjs` lints **every** shipped script for tag balance, so a stray
+`</whisper>` in a long example fails the harness rather than the synthesis.
 
 ### Agents (`agents`)
 Full console over `/v1/agent/*`: list / create / edit / archive, and per-agent
@@ -159,6 +222,33 @@ In-browser voice calls via `@fishaudio/agent-client` — mic, orb + FFT
 visualizer, live transcripts, mode indicator, tool-call feed, text input,
 mute/end. Public agents connect directly; private agents get a session token
 minted server-side with your API key.
+
+#### When a call fails, the error says why
+
+`@fishaudio/agent-client` funnels nearly every transport failure through a single
+message — **"Could not establish the realtime session"** — and hangs the real
+reason on `err.cause`. That is a trap for a caller, because the LiveKit transport
+awaits `getUserMedia` *outside* the `try/catch` that produces the message, so a
+microphone problem is reported as a failed **session**:
+
+| actual cause | SDK message |
+| --- | --- |
+| `NotReadableError` — mic in use by another app | "Could not establish the realtime session" |
+| `NotFoundError` — no microphone at all | "Could not establish the realtime session" |
+| `mediaDevices` undefined — plain-HTTP non-localhost origin | "Could not establish the realtime session" |
+| `OverconstrainedError` — selected device gone | "Could not establish the realtime session" |
+| `NotAllowedError` — permission denied | "Microphone permission was denied" |
+
+Only the last is distinguishable from the message alone. So `classifyCallError()`
+walks the whole `cause` chain and reports the **root** cause in plain language:
+
+```
+Could not start call: the microphone could not be started — another app is probably using it
+```
+
+`preflightCall()` runs first and rejects a non-secure origin outright, before a
+session token is minted. The full chain is kept on `window.__livecall().lastError`
+and logged to the console.
 
 > **Model note.** The Agents / Live Call path does **not** use Drama 3, and
 > cannot be made to. `AgentVoiceConfigView` exposes only `voice_id`,
@@ -201,13 +291,18 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/library.js     session-wide audio library (Studio → Lip Sync handoff)
   js/lipsync.js     lip sync page: actors, generate → bake → preview on the face
   js/convo.js       conversation-script parsing (DOM-free, unit-tested)
-  js/examples.js    all 9 Drama 3 features as loadable examples
+  js/examples.js    all 12 Drama 3 features as loadable examples
   js/agents.js      agents console
   js/livecall.js    Web SDK live calls
 tools/visemes.py    the Fish-anchored viseme baker (openfacefx + allosaurus)
 tools/bake_debug.py run the baker directly and print the real traceback
-tools/verify_ui.cjs      headless-Chrome UI harness (28 checks)
-tools/verify_lipsync.cjs headless-Chrome lip-sync harness (52 checks, real API)
+tools/compare_bakers.py  diff this baker against the game's gen_visemes.py
+tools/verify_ui.cjs      headless-Chrome UI harness (33 checks)
+tools/verify_lipsync.cjs headless-Chrome lip-sync harness (58 checks, real API)
+tools/probe_duo.cjs      two-hander playback probe — no API, hand-built takes
+tools/probe_examples.cjs  synthesize the complex examples end to end (1 call each)
+tools/probe_call.cjs      drive the real Live Call UI and unwrap the error chain
+tools/probe_call_failures.cjs  stub each call failure, check the message names it
 tools/verify_stream.cjs  streaming regression harness (7 checks)
 tools/echo_upstream.py   recording stub that stands in for api.fish.audio
 tools/probe_model.cjs    drives the real UI and asserts the `model` header sent
@@ -223,15 +318,38 @@ openapi.json        cached Fish Audio OpenAPI schema
 ## Verification
 
 ```bash
-NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 28/28, no credit needed
+NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 33/33, no credit needed
+NODE_PATH=.../node_modules node tools/probe_duo.cjs        # two-hander + min-hold, no credit needed
 NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # needs real API credit
+NODE_PATH=.../node_modules node tools/probe_call_failures.cjs   # call errors, no credit
+python tools/compare_bakers.py --endpoint http://127.0.0.1:8756   # baker parity
 ```
+
+`compare_bakers.py` needs the **system** Python (the one with `numpy`,
+`openfacefx` and `allosaurus`), not the studio's venv — same reason
+`tools/visemes.py` does.
 
 `verify_ui.cjs` drives the running app in headless Chrome and asserts the studio,
 tag insertion, wrapping, auto-tag, scenes, design, voice samples (including that
 the sample MP3 is actually fetched from the CDN), the voice picker, the examples
 library, agents, modal, live view and settings all work — and that the console is
 clean.
+
+`probe_duo.cjs` is the cheap, deterministic half of the two-hander coverage: it
+injects two hand-built takes (a generated WAV plus a hand-written sidecar)
+straight into the shared library, then drives the real DOM path — duo mode,
+assign A2/A1, play — while tracing each actor's audio element frame by frame. No
+synthesis, no baking, so it can be run on every change. It prints each actor's
+cue times and the shapes actually drawn.
+
+It also measures the **mouth hold**. `DialogueAvatar` will not change a mouth
+shape until it has been on screen for `avatar.voice.mouth_min_hold` (0.05 s), so
+a cue shorter than that is *drawn and held*, not invisible noise. The probe puts
+a deliberately tiny 20 ms `'D'` cue between two long ones, samples the shape on
+every animation frame, and asserts the `'D'` stayed up for ≥ 40 ms. On a
+60 fps page it measures ~67 ms — four frames instead of the one a naive
+`cueAt()` renderer would give. That is the same reason the baker must not drop
+short cues.
 
 `verify_lipsync.cjs` generates real audio and asserts the mouth actually moves:
 the bake round-trips, the cue timeline renders, the mouth cycles through
@@ -241,4 +359,19 @@ the hold, auto-blink fires while playing and stops when switched off, the
 Studio→Lip Sync take handoff auto-bakes, the exported sidecar is well-formed,
 sorted and inside the audio, and the two-hander works — per-avatar voices reach
 the wire, the script parser handles tags and unknown names, and **both** avatars
-animate their own mouths while the idle one stays closed.
+animate their own mouths while the idle one stays closed. It reads per-actor
+state through a read-only `window.__lipsync()` snapshot rather than inferring it
+from badge text, because a badge reading "closed" is also what an avatar with no
+mouth track at all looks like.
+
+`probe_call_failures.cjs` is the Live Call equivalent: it stubs each way a call
+can fail — a busy microphone, a denied one, no microphone, a vanished device, an
+insecure origin — drives the real UI, and asserts the toast names the actual
+cause rather than repeating the SDK's one-size-fits-all message. It also proves
+the healthy path still connects, so the error handling cannot be "fixed" by
+breaking the success path. No API credit: the failures all happen before the
+session is used.
+
+`probe_call.cjs` is the manual diagnosis tool for a call that will not start. It
+mints a session token, checks the mic, runs the SDK, and prints the whole
+unwrapped error chain — the thing the app used to throw away.

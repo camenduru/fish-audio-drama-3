@@ -445,15 +445,18 @@ async def lipsync_info() -> JSONResponse:
     face = (default or {}).get("face")
 
     viseme_states = None
+    voice = None
     blink = None
     gs = ROGUELIKE_ROOT / "assets" / "game_settings.json"
     if gs.exists():
         try:
             avatar = json.loads(gs.read_text(encoding="utf-8")).get("avatar") or {}
             viseme_states = avatar.get("visemes")
+            voice = avatar.get("voice")
             blink = avatar.get("blink")
         except Exception:
             viseme_states = None
+            voice = None
             blink = None
 
     return JSONResponse({
@@ -467,6 +470,10 @@ async def lipsync_info() -> JSONResponse:
         # The game's own blink tuning (DialogueAvatar::UpdateBlink reads these),
         # so the preview blinks like the game rather than on invented timing.
         "blink": blink,
+        # avatar.voice carries mouth_min_hold, which DialogueAvatar applies as a
+        # render hold (a shape cannot change until it has been on screen that
+        # long). The preview needs it or it flickers on cues the game would hold.
+        "voice": voice,
         "baker": {
             "python": VISEME_PYTHON,
             "python_exists": Path(VISEME_PYTHON).exists(),

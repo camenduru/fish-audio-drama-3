@@ -6,6 +6,7 @@ let SDK = null;          // module namespace
 let session = null;
 let rafId = null;
 let agents = [];
+let lastError = null;    // the last start failure, unwrapped — see describeCallError
 
 const CDNS = [
   'https://esm.sh/@fishaudio/agent-client@latest',
@@ -21,6 +22,93 @@ async function loadSdk() {
     catch (e) { lastErr = e; }
   }
   throw new Error('Could not load @fishaudio/agent-client from any CDN. ' + (lastErr?.message || ''));
+}
+
+/**
+ * Work out what actually went wrong, and say it in a way a human can act on.
+ *
+ * `@fishaudio/agent-client` funnels nearly every transport failure through one
+ * message — "Could not establish the realtime session" — and hangs the real
+ * reason on `.cause`. Printing only `.message` therefore throws away the only
+ * useful part. Worse, the LiveKit transport awaits getUserMedia *outside* the
+ * try/catch that produces that message, so a busy microphone, a missing
+ * microphone and an insecure origin are all reported as a failed *session*:
+ *
+ *   NotReadableError (mic in use)  -> "Could not establish the realtime session"
+ *   NotFoundError    (no mic)      -> "Could not establish the realtime session"
+ *   mediaDevices undefined (http)  -> "Could not establish the realtime session"
+ *   NotAllowedError  (denied)      -> "Microphone permission was denied"
+ *
+ * Only the last is distinguishable from the message alone. So classify on the
+ * root cause, and keep the whole chain for the console.
+ */
+function classifyCallError(e) {
+  const chain = [];
+  for (let cur = e, i = 0; cur && i < 6; cur = cur.cause, i++) chain.push(cur);
+  const root = chain[chain.length - 1] || e;
+  const names = chain.map(c => c.name).filter(Boolean);
+  const codes = chain.map(c => c.code).filter(c => typeof c === 'string');
+
+  const summary = chain
+    .map(c => {
+      const label = typeof c.code === 'string' ? c.code
+        : (c.name && c.name !== 'Error' ? c.name : '');
+      return [label, c.message || (typeof c === 'string' ? c : '')].filter(Boolean).join(': ');
+    })
+    .filter(Boolean)
+    .filter((s, i, a) => a.indexOf(s) === i)
+    .join('  ←  ') || 'unknown error';
+
+  const has = n => names.includes(n);
+  let hint = '';
+  if (has('NotAllowedError') || codes.includes('mic_permission_denied')) {
+    hint = 'the browser blocked the microphone — allow it for this site, then retry';
+  } else if (has('NotReadableError') || has('AbortError')) {
+    hint = 'the microphone could not be started — another app is probably using it';
+  } else if (has('NotFoundError')) {
+    hint = 'no microphone was found on this device';
+  } else if (has('OverconstrainedError')) {
+    hint = 'the selected microphone is unavailable';
+  } else if (has('TypeError') && /getUserMedia/.test(root?.message || '')) {
+    hint = 'WebRTC needs a secure origin — open the studio on http://localhost (or https), not a LAN IP';
+  } else if (codes.includes('session_expired')) {
+    hint = 'the session token expired before the call connected — just start it again';
+  } else if (codes.includes('origin_forbidden')) {
+    hint = "this page's origin is not in the agent's allowed origins";
+  } else if (codes.includes('agent_not_public')) {
+    hint = 'the agent is not published as public';
+  } else if (codes.includes('unsupported_transport')) {
+    hint = 'this session needs a newer @fishaudio/agent-client';
+  } else if (codes.includes('session_request_failed')) {
+    hint = 'the session request was rejected by the API';
+  } else if (codes.includes('provider_error') || codes.includes('internal_error')) {
+    hint = 'the agent runtime failed — see the console for the raw error';
+  } else if (/did not join/i.test(summary)) {
+    hint = 'the agent never joined the room — check that it is live and deployed in the Fish dashboard';
+  } else if (codes.includes('connection_failed')) {
+    hint = 'the WebRTC / LiveKit connection failed — check the network and try again';
+  }
+  return { summary, hint, code: codes[0] || null, rootName: root?.name || null };
+}
+
+/** One line for the toast; the full chain goes to the console and the seam. */
+function describeCallError(e) {
+  const { summary, hint } = classifyCallError(e);
+  return hint || summary;
+}
+
+/**
+ * A call needs WebRTC, and WebRTC needs a secure origin. `navigator.mediaDevices`
+ * is simply absent on a plain-HTTP page that is not localhost, which the SDK
+ * then reports as a failed session. Catch it here, before spending a session
+ * token, so the reason is unambiguous.
+ */
+function preflightCall() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return 'This page is not a secure origin, so WebRTC is unavailable. '
+         + 'Open the studio on http://localhost (or https) rather than a LAN IP or hostname.';
+  }
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +183,9 @@ async function startCall() {
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Connecting…';
   $('#liveChat').replaceChildren();
   try {
+    const blocked = preflightCall();
+    if (blocked) throw new Error(blocked);
+
     const { AgentSession } = await loadSdk();
     const opts = {
       clientTools: CLIENT_TOOLS,
@@ -108,7 +199,10 @@ async function startCall() {
         onToolCallStarted: ({ toolName, input }) => bubble('tool', `⚙ ${toolName}(${String(input).slice(0, 80)})`),
         onToolCallCompleted: ({ toolName }) => bubble('tool', `✓ ${toolName}`),
         onToolCallFailed: ({ toolName, error }) => bubble('tool', `✗ ${toolName}: ${error}`),
-        onError: err => toast('Call error: ' + (err?.code || err?.message || err), 'err'),
+        onError: err => {
+          lastError = { ...classifyCallError(err), message: err?.message, at: Date.now() };
+          toast('Call error: ' + describeCallError(err), 'err');
+        },
         onDisconnect: ({ reason }) => {
           $('#liveReason').textContent = reason;
           $('#liveStatus').textContent = 'ended';
@@ -132,7 +226,9 @@ async function startCall() {
     startVisualizer();
     toast('Connected.', 'ok');
   } catch (e) {
-    toast('Could not start call: ' + e.message, 'err');
+    lastError = { ...classifyCallError(e), message: e?.message, at: Date.now() };
+    console.error('[livecall] start failed', e);
+    toast('Could not start call: ' + describeCallError(e), 'err');
     toggleLiveUi(false);
   } finally {
     btn.disabled = false; btn.textContent = '🎙 Start call';
@@ -173,6 +269,23 @@ export function initLive() {
   $('#liveText').addEventListener('input', () => session?.sendUserActivity?.());
   $('#liveToolEvents').addEventListener('change', () => toast('Takes effect on the next call.'));
   loadAgentOptions();
+
+  // Read-only snapshot for the end-to-end harness. The toast disappears after
+  // 4 s and carries only a summary, so a test that wants to know *why* a call
+  // failed needs the unwrapped chain and the agent's real publish state.
+  window.__livecall = () => ({
+    status: $('#liveStatus')?.textContent,
+    mode: $('#liveMode')?.textContent,
+    agent: $('#liveAgent')?.value || '',
+    agents: agents.map(a => ({
+      agent_id: a.agent_id, name: a.name,
+      public_enabled: !!a.public_enabled, publication_state: a.publication_state,
+    })),
+    live: !$('#liveStart')?.classList.contains('hidden'),
+    sessionId: session?.sessionId || null,
+    lastError,
+    toasts: [...document.querySelectorAll('#toasts .toast')].map(t => t.textContent),
+  });
 }
 
 function sendText() {

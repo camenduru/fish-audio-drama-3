@@ -495,15 +495,40 @@ function loop(ts) {
   const dt = lastTs ? Math.min(0.1, (ts - lastTs) / 1000) : 0;
   lastTs = ts;
 
+  // The game's own mouth timing, so the preview cannot disagree with it.
+  const minHold = Number(state.info?.voice?.mouth_min_hold) || 0.05;
+  const latency = Number(state.info?.viseme_states?.latency_seconds) || 0;
+
   for (const act of state.actors) {
     const a = act.audio;
-    // Only the avatar whose audio is actually rolling gets to move its mouth.
-    // cueAt(sidecar, 0) returns whatever viseme the clip *starts* on, so an idle
-    // actor left holding a take would freeze with its mouth open on the first
-    // shape of a line it is not saying — in a two-hander that reads as both
-    // avatars talking at once, one of them silently stuck.
     const speaking = !!a && !a.paused && !a.ended;
-    const shape = act.sidecar && speaking ? cueAt(act.sidecar, a.currentTime) : 'X';
+
+    // This mirrors DialogueAvatar::UpdateMouth.
+    //
+    //  * Only the avatar whose audio is actually rolling gets to move its
+    //    mouth. cueAt(sidecar, 0) returns whatever viseme the clip *starts* on,
+    //    so an idle actor left holding a take would freeze with its mouth open
+    //    on the first shape of a line it is not saying — in a two-hander that
+    //    reads as both avatars talking at once, one of them silently stuck.
+    //  * The clock is shifted back by avatar.visemes.latency_seconds, so the
+    //    mouth never leads the voice (AudioSystem::CurrentVoiceSeconds).
+    //  * A shape must have been on screen for avatar.voice.mouth_min_hold
+    //    before it may change. The game holds it; without the hold the preview
+    //    flickers on a 20 ms cue the game draws for a full 50 ms.
+    act.mouthHold = (act.mouthHold ?? 0) - dt;
+
+    const prev = act.shape || 'X';
+    let shape = prev;
+    if (!speaking) {
+      act.mouthHold = 0;
+      shape = 'X';
+    } else {
+      const raw = act.sidecar ? cueAt(act.sidecar, Math.max(0, a.currentTime - latency)) : 'X';
+      if (raw !== prev && act.mouthHold <= 0) {
+        shape = raw;
+        act.mouthHold = minHold;
+      }
+    }
 
     if (act.blink) {
       if (state.blinkOn) act.blink.update(dt, shape === 'X');

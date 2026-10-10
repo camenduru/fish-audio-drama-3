@@ -29,6 +29,12 @@ export const DIRECTION_PRESETS = [
   'skeptical, questioning tone', 'suspiciously calm', 'way too fast',
   'excited, leaning in', 'laughing', 'shocked, voice dropping to a whisper',
   'pause before it, deadpan', 'genuinely excited', 'tired but proud, end of a long day',
+  // The registers the longer examples lean on: a turn in the room, a voice
+  // getting closer, a mood snapping mid-line.
+  'deadpan, utterly serious', 'clipped, all business', 'too cheerful',
+  'cutting in, dangerously calm', 'measured, serious', 'suddenly intense',
+  'low, documentary', 'conspiratorial whisper', 'gently, reading a bedtime story',
+  'breaking', 'voice dropping', 'closer now, urgent',
 ];
 
 export const PHONEME_LANGS = ['English', 'Chinese', 'Japanese', 'Korean', 'Spanish'];
@@ -210,4 +216,34 @@ Suspect: [defensive, slightly uneasy tone] I was home. [pause] Asleep.
 Detective: [skeptical, questioning tone] Then why is your coat still wet?`,
   'Podcast intro': `Host A: [excited, leaning in] Okay, I have to tell you what happened at the airport.
 Host B: [laughing] Oh no. Not again.`,
+  // Longer casts — four speakers, and scenes where the direction tracks a
+  // change in the room (a voice getting closer, a mood turning).
+  'Heist briefing': `Vex: [clipped, all business] We have ninety seconds. In and out.
+Marla: [chewing gum, unbothered] Relax. I've done this a hundred times.
+Vex: [flat] You've done it twice.
+Marla: [pause] ...Ninety-one seconds.
+Nova: [over the radio, distorted] Guys? The door's already open.
+Vex: [very slowly] Say that again.
+Nova: [small voice] The door. It's already open.
+Dex: [from the van, delighted] I told you the keycard was a bad idea.
+Vex: [pause] Everyone. Stop talking.`,
+  'Family dinner': `Dad: [too cheerful] So. Anyone want to explain the car?
+Teen: [mouth full] Nope.
+Mom: [not looking up] The car is fine.
+Dad: [pause] The car is in the kitchen.
+Teen: [pause] Okay, so, technically —
+Mom: [cutting in, dangerously calm] <emphasis>Finish your vegetables.</emphasis>`,
+  'Radio drama': `Narrator: [low, documentary] The lighthouse had been dark for eleven years.
+Keeper: [distant, over static] Is anyone receiving? [pause] Please.
+Narrator: [pause] That was the first transmission.
+Operator: [startled] Sir — you need to hear this.
+Keeper: [closer now, urgent] It's not a lighthouse. [pause] It never was.`,
+  'Interrogation': `Detective: [measured, serious] Let's go back to the fourteenth.
+Suspect: [trying to stay calm] I've told you. I was home.
+Detective: [pause] You were home.
+Suspect: [defensive, slightly uneasy tone] Yes.
+Detective: [quietly] Then why does your neighbour say she saw your car?
+Suspect: [pause] [voice dropping] ...She's mistaken.
+Detective: [gently questioning] She wrote down the plate.
+Suspect: [breaking] <whisper>I want to call my lawyer.</whisper>`,
 };

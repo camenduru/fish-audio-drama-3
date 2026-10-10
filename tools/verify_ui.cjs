@@ -115,11 +115,51 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   await new Promise(r => setTimeout(r, 400));
   const featBlocks = await page.$$eval('#exList .card', e => e.length);
   const exCards = await page.$$eval('#exList .example-card', e => e.length);
-  check('examples: all 9 feature blocks', featBlocks === 9, featBlocks + ' blocks');
-  check('examples: example scripts rendered', exCards >= 20, exCards + ' examples');
   const exNav = await page.$$eval('#exNav .ex-nav-item', e => e.length);
   const exTags = await page.$$eval('#exTags > div', e => e.length);
-  check('examples: sidebar nav + tag reference', exNav === 9 && exTags === 7, `${exNav} nav, ${exTags} tags`);
+  check('examples: all 12 feature blocks', featBlocks === 12, featBlocks + ' blocks');
+  check('examples: example scripts rendered', exCards >= 39, exCards + ' examples');
+  check('examples: sidebar nav + tag reference', exNav === featBlocks && exTags === 7, `${exNav} nav, ${exTags} tags`);
+
+  // Every shipped script must be tag-balanced — a stray </whisper> in a long
+  // example is invisible in the UI but breaks the synthesis outright.
+  const linted = await page.evaluate(async () => {
+    const E = await import('/js/examples.js');
+    const D3 = await import('/js/drama3.js');
+    const bad = [];
+    let total = 0;
+    for (const f of E.FEATURES) for (const it of f.items) {
+      total++;
+      const issues = D3.lint(it.script);
+      if (issues.length) bad.push(`block ${f.n}: ${issues.join('; ')}`);
+    }
+    for (const [name, s] of Object.entries(D3.SCENE_EXAMPLES)) {
+      total++;
+      const issues = D3.lint(s);
+      if (issues.length) bad.push(`scene "${name}": ${issues.join('; ')}`);
+    }
+    return { total, bad };
+  });
+  check('examples: every script is tag-balanced', linted.bad.length === 0,
+    linted.bad.length ? linted.bad.slice(0, 3).join(' | ') : `${linted.total} scripts clean`);
+
+  // The longer scenes have to survive the scene parser too: four speakers must
+  // come out as four speakers, not three with one line glued onto another.
+  const parsed = await page.evaluate(async () => {
+    const D3 = await import('/js/drama3.js');
+    const out = {};
+    for (const [name, s] of Object.entries(D3.SCENE_EXAMPLES)) {
+      const p = D3.parseScene(s);
+      out[name] = { speakers: p.speakers.length, turns: p.turns.length };
+    }
+    return out;
+  });
+  check('scenes: the four-hander parses to four speakers',
+    parsed['Heist briefing']?.speakers === 4 && parsed['Heist briefing']?.turns === 9,
+    JSON.stringify(parsed['Heist briefing'] || {}));
+  check('scenes: every preset yields speakers and turns',
+    Object.values(parsed).every(v => v.speakers >= 2 && v.turns >= 2),
+    Object.entries(parsed).map(([k, v]) => `${k}:${v.speakers}s/${v.turns}t`).join(' '));
   await page.screenshot({ path: OUT + '/examples.png' });
 
   // 8d. Load an example into the studio
@@ -143,6 +183,25 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   await new Promise(r => setTimeout(r, 400));
   const sceneVal = await page.$eval('#sceneScript', e => e.value);
   check('examples: scene example opens in Scenes', /Who ate the last slice/.test(sceneVal), sceneVal.slice(0, 34));
+
+  // 8f. The long four-hander has to reach Scenes and come back as four voices
+  await page.evaluate(() => document.querySelector('[data-view="examples"]').click());
+  await new Promise(r => setTimeout(r, 250));
+  await page.evaluate(() => {
+    const card = [...document.querySelectorAll('#exList .example-card')].find(c => /We have ninety seconds/.test(c.textContent));
+    [...card.querySelectorAll('button')].find(b => /Open in Scenes/.test(b.textContent)).click();
+  });
+  await new Promise(r => setTimeout(r, 500));
+  const fourHand = await page.evaluate(() => ({
+    speakers: document.querySelectorAll('#sceneSpeakers .speaker-card, #sceneSpeakers .card').length,
+    text: document.querySelector('#sceneScript')?.value || '',
+  }));
+  check('examples: the four-hander opens in Scenes',
+    /We have ninety seconds/.test(fourHand.text) && /Dex:/.test(fourHand.text),
+    fourHand.speakers + ' speaker card(s)');
+  // Exactly four: loading a scene replaces the cast rather than piling onto it.
+  check('examples: four speakers each get their own card', fourHand.speakers === 4,
+    fourHand.speakers + ' cards');
 
   // 9. Agents (real API, empty workspace)
   await page.evaluate(() => document.querySelector('[data-view="agents"]').click());

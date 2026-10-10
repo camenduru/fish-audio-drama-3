@@ -178,6 +178,11 @@ def apply_silence_pass(cues: list, wav_path: str, min_silence: float) -> list:
     Aligner-agnostic, and the reason [pause] works: the aligner may spread a
     mouth shape across the gap, but the audio energy decides where the silence
     really is, and any cue overlapping it is split and set to X.
+
+    The split / sort / merge / round / drop-tiny tail is byte-for-byte the same
+    as the game's tools/gen_visemes.py::apply_silence_pass. Keep it that way:
+    tools/compare_bakers.py diffs the two bakers on the same WAV, and a sidecar
+    that differs from the game's own is a preview that lies about what ships.
     """
     try:
         import numpy as np
@@ -240,15 +245,36 @@ def apply_silence_pass(cues: list, wav_path: str, min_silence: float) -> list:
                     nxt.append((b, e, v))
             segs = nxt
         out.extend(segs)
-    return [{"start": s, "end": e, "value": v} for s, e, v in out]
+
+    out.sort(key=lambda t: t[0])
+    merged = []
+    for s, e, v in out:
+        if merged and merged[-1][2] == v and abs(merged[-1][1] - s) < 1e-6:
+            merged[-1] = (merged[-1][0], e, v)
+        else:
+            merged.append((s, e, v))
+    return [
+        {"start": round(s, 3), "end": round(e, 3), "value": v}
+        for s, e, v in merged if e - s > 1e-4
+    ]
 
 
 def normalise(cues: list, duration: float) -> list:
-    """Sort, clamp to the audio, drop empties, and make the timeline contiguous.
+    """Sort, clamp and merge identical neighbours — nothing else.
 
-    The game's guard (tools/check_viseme_assets.py) FAILS a sidecar whose cues
-    are unsorted, non-contiguous, or have end <= start - so this is required,
-    not cosmetic. Gaps are filled with X (mouth closed).
+    This deliberately does NOT pad the timeline out to `duration`, fill gaps, or
+    absorb sub-30 ms cues. All three were tried and all three make the sidecar
+    differ from the game's:
+
+      * the game's VisemeTrack::Sample returns 'X' outside a cue, so a gap and
+        an explicit X cue render identically — padding changes the file, not the
+        face;
+      * the game HOLDS a shape for avatar.voice.mouth_min_hold (0.05 s), so a
+        20 ms cue is not invisible noise to be deleted — it is a shape the game
+        draws for 50 ms. Dropping it changed the mouth.
+
+    Clamping stays as a guard against an aligner overshooting the audio; it is a
+    no-op in practice.
     """
     items = []
     for c in cues:
@@ -262,40 +288,18 @@ def normalise(cues: list, duration: float) -> list:
         s = max(0.0, min(s, duration))
         e = max(0.0, min(e, duration))
         if e - s > 1e-4:
-            items.append([s, e, v])
+            items.append((round(s, 3), round(e, 3), v))
     if not items:
         return []
     items.sort(key=lambda t: t[0])
 
     out = []
     for s, e, v in items:
-        if out and s > out[-1][1] + 1e-6:
-            out.append([out[-1][1], s, "X"])      # fill the gap with a closed mouth
-        if out and abs(out[-1][1] - s) < 1e-6 and out[-1][2] == v:
+        if out and out[-1][2] == v and abs(out[-1][1] - s) < 1e-6:
             out[-1][1] = e                        # merge an identical neighbour
         else:
             out.append([s, e, v])
-    if out and out[0][0] > 1e-6:
-        out.insert(0, [0.0, out[0][0], "X"])
-    if out and out[-1][1] < duration - 1e-3:
-        out.append([out[-1][1], duration, "X"])
-    # Final sweep: the tail append above can land on a zero-length span, and the
-    # game's guard is stricter than "harmless".
-    clean = []
-    for s, e, v in out:
-        s, e = round(min(s, duration), 3), round(min(e, duration), 3)
-        if e - s <= 1e-4:
-            continue
-        # The game only renders a shape held >= min_hold_seconds (0.05), so a
-        # sub-30 ms cue is invisible noise - absorb it into the previous shape.
-        if e - s < 0.03 and clean:
-            clean[-1][1] = e
-            continue
-        if clean and abs(clean[-1][1] - s) < 1e-6 and clean[-1][2] == v:
-            clean[-1][1] = e
-        else:
-            clean.append([s, e, v])
-    return [{"start": s, "end": e, "value": v} for s, e, v in clean]
+    return [{"start": s, "end": e, "value": v} for s, e, v in out]
 
 
 def speech_gaps(align_json: dict, duration: float, min_gap: float = 0.05) -> list:
@@ -533,7 +537,7 @@ def bake(wav: str, text: str, align_json: dict | None, args) -> dict:
 
     if not args.no_silence_pass:
         cues = apply_silence_pass(cues, wav, args.silence_min)
-    if align_json and not args.no_speech_guard:
+    if align_json and args.speech_guard:
         cues = protect_speech_spans(cues, align_json, duration)
     cues = normalise(cues, duration)
     if not cues:
@@ -573,8 +577,11 @@ def main() -> int:
     ap.add_argument("--smooth", type=float, default=0.0)
     ap.add_argument("--lag", type=int, default=0)
     ap.add_argument("--no-silence-pass", action="store_true")
-    ap.add_argument("--no-speech-guard", action="store_true",
-                    help="skip re-opening the mouth inside a word Fish says is spoken")
+    ap.add_argument("--speech-guard", action="store_true",
+                    help="OPT-IN and DIVERGES from the game's baker: re-open the mouth "
+                         "inside a word Fish reports as spoken, to recover soft onsets "
+                         "the energy gate reads as silence. Off by default so the sidecar "
+                         "is identical to tools/gen_visemes.py output.")
     ap.add_argument("--silence-min", type=float, default=0.16)
     ap.add_argument("--python", default=sys.executable,
                     help="interpreter that has openfacefx (the system Python)")
