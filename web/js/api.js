@@ -66,6 +66,14 @@ export async function apiFetch(path, { method = 'GET', body, headers = {}, raw =
   if (!res.ok) {
     let detail;
     try { detail = await res.json(); } catch { detail = await res.text().catch(() => res.statusText); }
+    // A 401 from the studio's own password gate means the session expired or
+    // never existed: go to the login page. A 401 from Fish (a missing or
+    // rejected API key) must NOT do that, which is why the server marks the
+    // gate with `login_required` rather than relying on the status code.
+    if (res.status === 401 && detail?.login_required) {
+      location.href = '/login';
+      throw new Error('redirecting to sign in');
+    }
     const msg = detail?.message || detail?.detail || (typeof detail === 'string' ? detail : '') || res.statusText;
     const err = new Error(`${res.status} · ${msg}`);
     err.status = res.status; err.detail = detail;

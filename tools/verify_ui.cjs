@@ -1,4 +1,5 @@
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const BASE = 'http://127.0.0.1:8756';
@@ -12,6 +13,7 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
     defaultViewport: { width: 1500, height: 950 },
   });
   const page = await browser.newPage();
+  await signIn(page, BASE);
   const errors = [];
   const warns = [];
   const media = [];

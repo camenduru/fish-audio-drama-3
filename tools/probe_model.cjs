@@ -3,6 +3,7 @@
  * that actually leaves the server for each generation path.
  */
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 const fs = require('fs');
 
 const APP = 'http://127.0.0.1:8757';
@@ -26,6 +27,7 @@ function mark() {
     args: ['--no-sandbox', '--disable-gpu', '--window-size=1500,950'],
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
   await page.setViewport({ width: 1500, height: 950 });
   await page.goto(APP, { waitUntil: 'networkidle2' });
   await sleep(600);

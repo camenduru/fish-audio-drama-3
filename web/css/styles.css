@@ -86,7 +86,13 @@ a:hover { text-decoration: underline; }
   display: flex; align-items: center; gap: 14px; padding: 0 18px;
 }
 .topbar h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; }
-.topbar .sub { color: var(--text-3); font-size: 12px; }
+.topbar .sub {
+  color: var(--text-3); font-size: 12px;
+  /* This is a secondary line, so a narrow window truncates it rather than
+     wrapping and pushing the badges (and the tags button) past the edge.
+     min-width: 0 is what lets a flex item shrink below its content width. */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .topbar .grow { flex: 1; }
 
 .view { flex: 1; overflow: hidden; display: none; }
@@ -502,7 +508,13 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
    ==========================================================================
    Its opener is #tagFab in the top bar, beside the key and model badges. It
    used to float at the window's bottom-left corner as a .tag-fab, which put it
-   over the last rail item: the centre of Settings opened the tag library. */
+   over the last rail item: the centre of Settings opened the tag library.
+
+   The top bar has no slack in a narrow window, so the button gives its label
+   up rather than pushing the badges off the edge — it ellipsizes to the icon
+   plus what fits, and shrinks further to the icon alone. */
+#tagFab { min-width: 0; }
+.tag-fab-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
 /* --- toolbar above the categories --- */
 .tag-tools { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 12px; }

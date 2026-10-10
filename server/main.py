@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import importlib.util
 import io
 import json
@@ -30,7 +32,7 @@ import httpx
 import msgpack
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -211,6 +213,193 @@ class _LoopBoundClient:
 _client = _LoopBoundClient()
 
 
+# --------------------------------------------------------------------------- #
+# Password gate
+# --------------------------------------------------------------------------- #
+# Set APP_PASSWORD to put the whole studio behind a password; leave it unset and
+# nothing changes (local development stays open).
+#
+# The session is a signed cookie rather than a server-side session table: a
+# serverless deployment runs several instances and recycles them, so anything
+# kept in memory would log people out at random. Signing with HMAC-SHA256 means
+# any instance can verify a cookie without sharing state.
+COOKIE_NAME = os.environ.get("SESSION_COOKIE", "studio_session")
+SESSION_SECONDS = int(float(os.environ.get("SESSION_HOURS", "168")) * 3600)
+
+
+def app_password() -> str:
+    """The gate password: environment first, then .env (like the API key)."""
+    return os.environ.get("APP_PASSWORD") or _read_env_file().get("APP_PASSWORD", "")
+
+
+def password_required() -> bool:
+    return bool(app_password())
+
+
+def _session_secret() -> bytes:
+    """Key for the session MAC.
+
+    SESSION_SECRET is preferred. Falling back to the password itself is
+    deliberate: it keeps the gate a one-variable setup, and changing the
+    password then invalidates every existing session, which is what you want.
+    """
+    secret = os.environ.get("SESSION_SECRET") or _read_env_file().get("SESSION_SECRET", "")
+    return (secret or app_password()).encode("utf-8")
+
+
+def _sign(payload: str) -> str:
+    return hmac.new(_session_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def make_session_token() -> str:
+    expires = str(int(time.time()) + SESSION_SECONDS)
+    return f"{expires}.{_sign(expires)}"
+
+
+def session_is_valid(token: str | None) -> bool:
+    if not token or "." not in token:
+        return False
+    expires, _, signature = token.partition(".")
+    # compare_digest, so a wrong signature cannot be found byte by byte.
+    if not hmac.compare_digest(_sign(expires), signature):
+        return False
+    try:
+        return int(expires) > int(time.time())
+    except ValueError:
+        return False
+
+
+# Failed-attempt throttling, per IP. Best-effort: each serverless instance keeps
+# its own counter, which still blunts a scripted guessing loop on one instance.
+_attempts: dict[str, list[float]] = {}
+_MAX_ATTEMPTS = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "8"))
+_ATTEMPT_WINDOW = float(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))
+
+
+def _too_many_attempts(ip: str) -> bool:
+    now = time.time()
+    hits = [t for t in _attempts.get(ip, []) if now - t < _ATTEMPT_WINDOW]
+    _attempts[ip] = hits
+    return len(hits) >= _MAX_ATTEMPTS
+
+
+def _record_failure(ip: str) -> None:
+    _attempts.setdefault(ip, []).append(time.time())
+
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in \u00b7 Drama 3 Studio</title>
+<style>
+  :root { --bg:#0a0e13; --panel:#131b25; --line:#22303f; --text:#e6edf5;
+          --text-3:#66788d; --accent:#ff7a59; --red:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center;
+         background:var(--bg); color:var(--text);
+         font:14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  form { width:min(360px, 90vw); background:var(--panel); border:1px solid var(--line);
+         border-radius:12px; padding:26px 24px; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  p { color:var(--text-3); font-size:12.5px; margin:0 0 18px; }
+  input { width:100%; padding:10px 12px; border-radius:7px; font:inherit;
+          background:var(--bg); border:1px solid var(--line); color:var(--text); outline:none; }
+  input:focus { border-color:var(--accent); }
+  button { width:100%; margin-top:12px; padding:10px; border:0; border-radius:7px;
+           background:var(--accent); color:#1a0d08; font:inherit; font-weight:650; cursor:pointer; }
+  .err { color:var(--red); font-size:12.5px; min-height:18px; margin-top:10px; }
+</style></head>
+<body>
+  <form method="post" action="/api/login">
+    <h1>Drama 3 Studio</h1>
+    <p>This studio is password protected.</p>
+    <input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password">
+    <div class="err">{error}</div>
+    <button type="submit">Enter</button>
+  </form>
+</body></html>"""
+
+# Paths the gate lets through: the login flow itself, and nothing else. Every
+# page, script and stylesheet behind them stays closed until the cookie exists.
+_PUBLIC_PATHS = {"/login", "/api/login", "/api/logout", "/favicon.ico"}
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    return (forwarded.split(",")[0].strip()
+            or (request.client.host if request.client else ""))
+
+
+@app.middleware("http")
+async def password_gate(request: Request, call_next):
+    if not password_required():
+        return await call_next(request)
+    path = request.url.path
+    # CORS preflight carries no cookie, so blocking it would break every
+    # cross-origin caller the moment a password is set.
+    if request.method == "OPTIONS" or path in _PUBLIC_PATHS:
+        return await call_next(request)
+    if session_is_valid(request.cookies.get(COOKIE_NAME)):
+        return await call_next(request)
+
+    if path.startswith("/api/"):
+        # `login_required` is the marker the front end keys off. A plain 401 is
+        # also what an upstream Fish auth failure looks like, so the status code
+        # alone cannot tell the app to show the login page.
+        return JSONResponse(
+            status_code=401,
+            content={"status": 401, "login_required": True,
+                     "message": "Sign in to use the studio."},
+            headers={"WWW-Authenticate": "Studio-Login"},
+        )
+    return RedirectResponse("/login", status_code=302)
+
+
+@app.get("/login")
+async def login_page(error: str = "") -> HTMLResponse:
+    message = {
+        "bad": "Wrong password.",
+        "locked": "Too many attempts. Wait a few minutes and try again.",
+    }.get(error, "")
+    return HTMLResponse(LOGIN_PAGE.replace("{error}", message))
+
+
+@app.post("/api/login")
+async def login(request: Request) -> Response:
+    ip = _client_ip(request)
+    if _too_many_attempts(ip):
+        return RedirectResponse("/login?error=locked", status_code=303)
+
+    form = await request.form()
+    supplied = str(form.get("password") or "")
+    # compare_digest again: the check should not leak the password's prefix.
+    if not hmac.compare_digest(supplied, app_password()):
+        _record_failure(ip)
+        return RedirectResponse("/login?error=bad", status_code=303)
+
+    _attempts.pop(ip, None)
+    secure = (request.url.scheme == "https"
+              or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https")
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(
+        COOKIE_NAME,
+        make_session_token(),
+        max_age=SESSION_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/logout")
+async def logout() -> Response:
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return response
+
+
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     for client in list(_clients.values()):
@@ -274,6 +463,9 @@ async def status() -> dict[str, Any]:
         "data_dir_persistent": DATA_DIR_PERSISTENT,
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "baker": baker_status(),
+        # Whether this instance is behind APP_PASSWORD, so Setup can offer a
+        # sign-out only when there is a session to end.
+        "password_required": password_required(),
     }
 
 

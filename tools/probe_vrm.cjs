@@ -26,6 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = process.env.CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -53,6 +54,7 @@ const check = (name, ok, detail = '') => {
            ...(process.env.CHROME_ARGS ? process.env.CHROME_ARGS.split(/\s+/).filter(Boolean) : [])],
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
   const errors = [];
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', e => errors.push(String(e)));

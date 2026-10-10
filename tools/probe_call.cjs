@@ -8,6 +8,7 @@
  * Usage: node tools/probe_call.cjs [agent_id]
  */
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -24,6 +25,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ],
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
   const logs = [];
   page.on('console', m => logs.push(`[${m.type()}] ${m.text()}`));
   page.on('pageerror', e => logs.push(`[pageerror] ${e}`));

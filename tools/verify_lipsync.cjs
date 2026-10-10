@@ -8,6 +8,7 @@
  * and the avatar voice reference_id.
  */
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -36,6 +37,7 @@ async function waitFor(fn, { tries = 120, every = 1000 } = {}) {
     args: ['--no-sandbox', '--disable-gpu', '--autoplay-policy=no-user-gesture-required'],
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
   await page.setViewport({ width: 1500, height: 950 });
   const errors = [];
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });

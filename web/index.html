@@ -80,7 +80,7 @@
       <h1 id="viewTitle">VRM Call</h1>
       <span class="sub" id="viewSub">Give the agent a VRM body and talk to it</span>
       <div class="grow"></div>
-      <button class="btn sm ghost" id="tagFab" title="Complex tags — ready-made dramatic combinations (Ctrl / ⌘ + /)">🏷 Complex tags</button>
+      <button class="btn sm ghost" id="tagFab" aria-label="Complex tags library" title="Complex tags — ready-made dramatic combinations (Ctrl / ⌘ + /)">🏷<span class="tag-fab-label">Complex tags</span></button>
       <span class="badge" id="keyBadge">…</span>
       <span class="badge accent" id="modelBadge">drama-3-preview</span>
     </header>
@@ -617,6 +617,10 @@
             <div class="hint mb">Stored server-side in <span class="mono">.env</span> and never sent to the browser. Get one at <a href="https://fish.audio/app/api-keys/" target="_blank">fish.audio/app/api-keys</a>.</div>
             <div class="row"><input class="input mono" id="setKey" type="password" placeholder="sk-fish-…"><button class="btn primary" id="setKeySave">Save</button></div>
             <div class="hint mt" id="setKeyStatus"></div>
+            <div class="flex gap mt hidden" id="lockRow">
+              <button class="btn sm ghost" id="lockOut">🔒 Sign out</button>
+              <span class="hint">This studio is behind <span class="mono">APP_PASSWORD</span>; signing out returns you to the password prompt.</span>
+            </div>
           </div>
         </div>
         <div class="card mb">

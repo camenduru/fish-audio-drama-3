@@ -9,6 +9,7 @@
  * Usage: node tools/probe_call_failures.cjs
  */
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -46,6 +47,7 @@ const CASES = [
 
   for (const c of CASES) {
     const page = await browser.newPage();
+    await signIn(page, APP);
     const errs = [];
     page.on('pageerror', e => errs.push(String(e)));
     await page.goto(APP + '/#live', { waitUntil: 'networkidle2' });

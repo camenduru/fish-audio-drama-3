@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -27,6 +28,7 @@ const SECONDS = Number(process.env.CAPTURE_SECONDS || 20);
            '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
   const logs = [];
   page.on('console', m => { if (m.type() === 'error') logs.push(m.text()); });
   page.on('pageerror', e => logs.push(String(e)));

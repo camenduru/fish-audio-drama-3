@@ -52,6 +52,8 @@ async function refreshStatus() {
       : (s.hosted
           ? 'No key: set FISH_API_KEY in this host\u2019s environment variables.'
           : 'No key configured.');
+    // Only offered when this instance is actually behind the password gate.
+    $('#lockRow').classList.toggle('hidden', !s.password_required);
   } catch (e) {
     $('#keyBadge').textContent = 'offline';
     $('#keyBadge').className = 'badge red';
@@ -105,6 +107,11 @@ async function loadWallet() {
 
 // ---------------------------------------------------------------------------
 function initSettings() {
+  $('#lockOut').addEventListener('click', async () => {
+    try { await apiFetch('/api/logout', { method: 'POST' }); } catch { /* leaving anyway */ }
+    location.href = '/login';
+  });
+
   $('#setKeySave').addEventListener('click', async () => {
     const key = $('#setKey').value.trim();
     if (!key) { toast('Paste a key first.', 'err'); return; }

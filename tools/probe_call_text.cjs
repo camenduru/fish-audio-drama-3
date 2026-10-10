@@ -16,6 +16,7 @@
  * Costs one session per phase.  Usage: node tools/probe_call_text.cjs [agent_id]
  */
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -37,6 +38,7 @@ async function phase(label, { fakeDevice, forceTextOnly, expectText, agentId }) 
     defaultViewport: { width: 1500, height: 950 },
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
   const errors = [];
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));

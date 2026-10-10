@@ -18,6 +18,7 @@
  * Costs one TTS call.  Usage: node tools/probe_scenes.cjs
  */
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -31,6 +32,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     defaultViewport: { width: 1500, height: 950 },
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
 
   const results = [];
   const check = (name, ok, extra = '') =>

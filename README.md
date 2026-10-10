@@ -504,6 +504,41 @@ the enum is `s1 | s2-pro | s2.1-pro | s2.1-pro-free | drama-3-preview`.
 > (with `tools/echo_upstream.py`) is the wire-level check for this: it points the
 > app at a recording stub and asserts the `model` header on every path.
 
+## Password protection
+
+Set `APP_PASSWORD` and the whole studio — every page, script and API route —
+sits behind a password prompt:
+
+```bash
+APP_PASSWORD='your-password' ./run.sh     # or put APP_PASSWORD=… in .env
+```
+
+Leave it unset and nothing changes, so local development stays open.
+
+- **The gate is server-side.** An unauthenticated page request is redirected to
+  `/login`; an unauthenticated `/api/*` request gets a `401` carrying
+  `login_required`, which is the marker the app keys off. The marker matters: a
+  bare 401 is also how a missing Fish API key fails, and that must not bounce
+  you to a login page.
+- **The session is a signed cookie, not a server-side table.** Nothing is kept
+  in memory, so it survives a serverless instance being recycled and works
+  across several of them.
+- **Changing the password signs everyone out.** `SESSION_SECRET` keys the
+  signature; without it the password itself is the key.
+- `SESSION_HOURS` (default `168`, one week) sets the session lifetime;
+  `LOGIN_MAX_ATTEMPTS` (default `8`) and `LOGIN_WINDOW_SECONDS` (default `300`)
+  throttle guessing. The counter is per-instance, so on a hosted deployment each
+  function instance counts separately.
+- Setup shows **🔒 Sign out** when the gate is on, and the cookie is sent
+  `HttpOnly`, `SameSite=Lax`, and `Secure` whenever the request arrives over
+  HTTPS.
+- **The harnesses keep working.** Everything in `tools/` that drives the UI
+  reads `APP_PASSWORD` (environment first, then `.env`, as the server does) and
+  signs in through `tools/session.cjs` before it starts. With no password set the
+  helper does nothing, so an open studio is unaffected. The one exception is
+  `tools/compare_bakers.py`, which posts to `/api/visemes` over plain HTTP and
+  needs an ungated studio or the session cookie.
+
 ## Deploying to Vercel
 
 Three files plus an ignore list are what Vercel needs, and they are all in the
@@ -520,7 +555,9 @@ Function:
 Set the key as an environment variable — Project → Settings → Environment
 Variables, or `vercel env add FISH_API_KEY`. The server prefers `FISH_API_KEY`
 from the environment over `.env`, which matters because a deploy has no writable
-`.env` to fall back to.
+`.env` to fall back to. Add `APP_PASSWORD` the same way (see [Password
+protection](#password-protection)) — on a public deployment you almost
+certainly want it, since the server holds your Fish key.
 
 ### What changes on a serverless host
 

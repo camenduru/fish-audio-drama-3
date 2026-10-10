@@ -6,6 +6,7 @@
  * silently produced a 0-byte take.
  */
 const puppeteer = require('puppeteer-core');
+const { signIn } = require('./session.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -24,6 +25,7 @@ const check = (name, ok, detail) => {
     args: ['--no-sandbox', '--disable-gpu', '--autoplay-policy=no-user-gesture-required'],
   });
   const page = await browser.newPage();
+  await signIn(page, APP);
   const errors = [];
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', e => errors.push(String(e)));
