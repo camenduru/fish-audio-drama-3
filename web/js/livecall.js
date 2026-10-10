@@ -8,6 +8,8 @@ let rafId = null;
 let agents = [];
 let lastError = null;    // the last start failure, unwrapped — see describeCallError
 let mintedSessionId = null;  // a session token we minted but never handed to the SDK
+let textOnly = false;    // this call joined without capturing a microphone
+let micAvailable = null; // last mic probe: true/false, null before the first call
 
 const CDNS = [
   'https://esm.sh/@fishaudio/agent-client@latest',
@@ -112,6 +114,53 @@ function preflightCall() {
   return '';
 }
 
+/**
+ * Is there a microphone to capture?
+ *
+ * A call does not require one. Asking for it anyway is what turned "this device
+ * has no mic" into "the call could not start": `getUserMedia` throws
+ * NotFoundError, the SDK surfaces that as a failed *session*, and the only way
+ * forward was a device the user does not have. So find out first and join
+ * text-first when there is nothing to capture.
+ *
+ * `enumerateDevices` answers this without a permission prompt. An empty list is
+ * the one answer worth acting on: browsers that withhold device *labels* before
+ * permission still list the devices themselves, so a real microphone is visible
+ * here even before the user has granted anything.
+ */
+async function hasMicrophone() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.some(d => d.kind === 'audioinput');
+  } catch {
+    return true;   // cannot tell — attempt the mic and let the fallback catch it
+  }
+}
+
+/**
+ * Did this failure come from the microphone rather than from the session?
+ *
+ * The SDK reports a busy, missing, blocked or unplugged microphone through the
+ * same "Could not establish the realtime session" message, so the only reliable
+ * signal is the classified hint (see classifyCallError).
+ */
+function isMicFailure(e) {
+  const { hint, code } = classifyCallError(e);
+  return code === 'mic_permission_denied' || /microphone|\bmic\b/i.test(hint);
+}
+
+/**
+ * Release a session we minted but never handed to the SDK. The token has
+ * already created a session server-side, and nothing else will end it.
+ */
+function releaseMinted() {
+  if (!mintedSessionId) return;
+  const sid = mintedSessionId;
+  mintedSessionId = null;
+  apiFetch(`/api/sessions/${encodeURIComponent(sid)}/end`, { method: 'POST' })
+    .catch(() => {});          // best effort: the server times it out anyway
+}
+
 // ---------------------------------------------------------------------------
 async function loadAgentOptions() {
   const selEl = $('#liveAgent');
@@ -145,7 +194,25 @@ function bubble(role, text, id) {
 
 function setMode(mode) {
   $('#liveOrb').className = 'orb ' + mode;
-  $('#liveMode').textContent = ({ listening: 'Listening…', thinking: 'Thinking…', speaking: 'Speaking…' }[mode]) || mode || '—';
+  const label = {
+    listening: 'Listening…', thinking: 'Thinking…', speaking: 'Speaking…',
+    text: 'Text mode — type below',
+  }[mode];
+  // Without a microphone there is nothing to listen to, so the runtime's own
+  // "listening" is misleading here; say what the user should actually do.
+  $('#liveMode').textContent =
+    textOnly && mode === 'listening' ? 'Text mode — type below' : (label || mode || '—');
+}
+
+/**
+ * The mute button doubles as the way *into* a microphone from a text-only call:
+ * on a session started with `microphone: false`, the first unmute is what
+ * captures and publishes it (and so is where the permission prompt appears).
+ */
+function updateMuteBtn() {
+  const b = $('#liveMute');
+  if (!session) { b.textContent = '🔇 Mute'; return; }
+  b.textContent = textOnly ? '🎙 Use microphone' : (session.micMuted ? '🔊 Unmute' : '🔇 Mute');
 }
 
 function startVisualizer() {
@@ -188,11 +255,24 @@ async function startCall() {
     if (blocked) throw new Error(blocked);
 
     const { AgentSession } = await loadSdk();
+
+    // Decide up front whether this call captures a microphone. `microphone:
+    // false` is the SDK's documented text-first mode: it connects without
+    // requesting one, and `sendUserMessage` answers with text rather than
+    // speech. The call is otherwise a normal call — the agent, the transcripts
+    // and the client tools all work; only the input is the keyboard.
+    const forcedText = !!$('#liveTextOnly')?.checked;
+    micAvailable = await hasMicrophone();
+    const wantMic = !forcedText && micAvailable;
+
     const opts = {
       clientTools: CLIENT_TOOLS,
       toolEvents: $('#liveToolEvents').checked,
+      microphone: wantMic,
       callbacks: {
-        onStatusChange: s => { $('#liveStatus').textContent = s; },
+        onStatusChange: s => {
+          $('#liveStatus').textContent = textOnly && s === 'connected' ? 'live · text' : s;
+        },
         onModeChange: setMode,
         onUserTranscript: ({ segmentId, text, final }) => bubble('user', text, 'u_' + segmentId),
         onAgentResponseDelta: ({ segmentId, text }) => bubble('agent', text, 'a_' + segmentId),
@@ -213,23 +293,49 @@ async function startCall() {
       },
     };
 
-    if (agent?.public_enabled) {
-      opts.agentId = agentId;
-      session = await AgentSession.start(opts);
-    } else {
+    // One connect, parameterised by whether it takes the microphone, so the
+    // text-only retry below is the same code path rather than a second one.
+    const connect = async useMic => {
+      const o = { ...opts, microphone: useMic };
+      if (agent?.public_enabled) {
+        o.agentId = agentId;
+        return AgentSession.start(o);
+      }
       const token = await apiFetch('/api/sessions', { method: 'POST', body: { agent_id: agentId } });
       // Remember the id: if the connect below fails, the token has already
       // minted a session server-side and nothing else will release it.
       mintedSessionId = token?.session_id || null;
-      session = await AgentSession.start({ ...opts, sessionToken: token });
+      return AgentSession.start({ ...o, sessionToken: token });
+    };
+
+    textOnly = !wantMic;
+    try {
+      session = await connect(wantMic);
+    } catch (e) {
+      // A microphone we thought we had — busy, blocked, or unplugged between
+      // the check above and the capture — must not cost the user the call.
+      // Retry without it rather than reporting a dead session.
+      if (!wantMic || !isMicFailure(e)) throw e;
+      releaseMinted();
+      session = await connect(false);
+      textOnly = true;
+      toast('No usable microphone — joined in text mode.', '');
     }
+
     mintedSessionId = null;    // the SDK owns it from here
+    // Best effort: unlock playback so the agent's first spoken reply is not
+    // swallowed by the autoplay policy. The click that started the call is the
+    // gesture. sendText() repeats this, where a gesture is guaranteed.
+    session.startAudio?.().catch(() => {});
     $('#liveSid').textContent = session.sessionId || '—';
-    $('#liveTransport').textContent = 'livekit (WebRTC)';
+    $('#liveTransport').textContent = textOnly ? 'livekit (WebRTC) · text-only' : 'livekit (WebRTC)';
+    $('#liveText').placeholder = textOnly ? 'Type your message…' : 'Type instead of talking…';
     toggleLiveUi(true);
-    setMode('listening');
+    setMode(textOnly ? 'text' : 'listening');
+    updateMuteBtn();
     startVisualizer();
-    toast('Connected.', 'ok');
+    toast(textOnly ? 'Connected — type below to talk.' : 'Connected.', 'ok');
+    if (textOnly) $('#liveText').focus();
   } catch (e) {
     lastError = { ...classifyCallError(e), message: e?.message, at: Date.now() };
     console.error('[livecall] start failed', e);
@@ -237,12 +343,7 @@ async function startCall() {
     toggleLiveUi(false);
     // Release the session the failed attempt already minted, so retrying a
     // broken call does not pile abandoned sessions onto the account.
-    if (mintedSessionId) {
-      const sid = mintedSessionId;
-      mintedSessionId = null;
-      apiFetch(`/api/sessions/${encodeURIComponent(sid)}/end`, { method: 'POST' })
-        .catch(() => {});          // best effort: the server times it out anyway
-    }
+    releaseMinted();
   } finally {
     btn.disabled = false; btn.textContent = '🎙 Start call';
   }
@@ -254,8 +355,11 @@ function toggleLiveUi(live) {
   $('#liveMute').classList.toggle('hidden', !live);
   $('#liveText').disabled = !live;
   $('#liveSend').disabled = !live;
-  $('#liveStatus').textContent = live ? 'live' : 'idle';
-  if (!live) { $('#liveOrb').className = 'orb'; $('#liveMode').textContent = '—'; $('#liveWave').replaceChildren(); }
+  $('#liveStatus').textContent = live ? (textOnly ? 'live · text' : 'live') : 'idle';
+  if (!live) {
+    textOnly = false;                  // the next call re-evaluates the mic
+    $('#liveOrb').className = 'orb'; $('#liveMode').textContent = '—'; $('#liveWave').replaceChildren();
+  }
 }
 
 function stopVisualizer() { if (rafId) cancelAnimationFrame(rafId); rafId = null; session = null; }
@@ -271,16 +375,31 @@ export function initLive() {
   $('#liveAgent').addEventListener('focus', () => { if (!agents.length) loadAgentOptions(); }, { once: true });
   $('#liveStart').addEventListener('click', startCall);
   $('#liveEnd').addEventListener('click', endCall);
-  $('#liveMute').addEventListener('click', () => {
+  $('#liveMute').addEventListener('click', async () => {
     if (!session) return;
-    const m = !session.micMuted;
-    session.setMicMuted(m);
-    $('#liveMute').textContent = m ? '🔊 Unmute' : '🔇 Mute';
+    // On a text-only call the button is the way *in*: unmuting captures the mic.
+    const muted = textOnly ? false : !session.micMuted;
+    try {
+      await session.setMicMuted(muted);
+    } catch (e) {
+      // This is where a missing or denied microphone surfaces on a text-only
+      // session. Stay text-only — the call is still perfectly usable.
+      toast('Could not use the microphone: ' + describeCallError(e), 'err');
+      updateMuteBtn();
+      return;
+    }
+    if (!muted) {
+      textOnly = false;
+      setMode('listening');
+      toast('Microphone on.', 'ok');
+    }
+    updateMuteBtn();
   });
   $('#liveSend').addEventListener('click', sendText);
   $('#liveText').addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
   $('#liveText').addEventListener('input', () => session?.sendUserActivity?.());
   $('#liveToolEvents').addEventListener('change', () => toast('Takes effect on the next call.'));
+  $('#liveTextOnly').addEventListener('change', () => toast('Takes effect on the next call.'));
   loadAgentOptions();
 
   // Read-only snapshot for the end-to-end harness. The toast disappears after
@@ -294,19 +413,32 @@ export function initLive() {
       agent_id: a.agent_id, name: a.name,
       public_enabled: !!a.public_enabled, publication_state: a.publication_state,
     })),
-    live: !$('#liveStart')?.classList.contains('hidden'),
+    // toggleLiveUi() hides the start button while a call is up, so the button
+    // being hidden IS the live state. (This expression used to be negated, so
+    // the seam reported `live: true` whenever no call was running.)
+    live: !!$('#liveStart')?.classList.contains('hidden'),
     sessionId: session?.sessionId || null,
+    textOnly,
+    micMuted: session?.micMuted ?? null,
+    micAvailable,
     lastError,
     toasts: [...document.querySelectorAll('#toasts .toast')].map(t => t.textContent),
   });
 }
 
-function sendText() {
+async function sendText() {
   const v = $('#liveText').value.trim();
   if (!v || !session) return;
-  session.sendUserMessage(v);
-  bubble('user', v, null);
   $('#liveText').value = '';
+  // Two things must be true before the agent can be *heard* on a text-first
+  // call. A typed turn is answered with text only unless we ask for audio — the
+  // SDK's default, and the reason a no-mic call was silent. And the browser's
+  // autoplay policy blocks playback that did not start from a gesture, which
+  // this click (or Enter) is, so it is the right place to unlock it.
+  try { await session.startAudio(); } catch {}
+  session.sendUserMessage(v, { audio: true });
+  // No bubble here: the SDK's onUserTranscript owns the user's side of the
+  // transcript. Drawing one too is what showed every typed line twice.
 }
 
 export { loadAgentOptions };
