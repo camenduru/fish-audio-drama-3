@@ -250,6 +250,64 @@ Could not start call: the microphone could not be started — another app is pro
 session token is minted. The full chain is kept on `window.__livecall().lastError`
 and logged to the console.
 
+#### A failed call no longer leaks a session
+
+A start mints a session token *before* it connects. If the connect then fails,
+nothing used to tell the server — so the session sat in `pending` until the
+server-side `room_join_timeout`, and a user retrying a broken call quietly filled
+their session list with abandoned calls. `startCall()` now remembers the minted
+`session_id` and releases it on the failure path via
+`POST /api/sessions/{id}/end` (best effort — the server times it out regardless).
+The insecure-origin case never gets that far, because the preflight runs first.
+
+Two things worth knowing about the API:
+
+- `POST /v1/agent/sessions/{id}/end` is a **no-op once a session has recorded an
+  `end_reason`** (e.g. `room_join_timeout`). It returns 204 either way, so it
+  cannot be used to tidy up already-timed-out rows.
+- `ended_at` is only set for sessions that actually joined a room. A session that
+  never joined keeps `ended_at: null` forever, so "has no `ended_at`" is not the
+  same as "is live" — filter on `status=active` instead. There is no delete
+  endpoint; abandoned rows age out.
+
+#### Testing a call: ask by text, then ask by voice
+
+`tools/probe_call_voice.cjs` runs the whole loop for real. It generates a TTS
+clip of the question, feeds it in as the **fake microphone**
+(`--use-file-for-fake-audio-capture`), then drives the app: type the question
+into the call and send it as text, then let the microphone carry the same
+question so it goes through the agent's ASR.
+
+```
+--- after connect (agent greeting) ---
+  agent: What is your name?
+=== PHASE 1 · ask by TEXT ===
+  agent: I'm your voice assistant, here to help you out.
+=== PHASE 2 · ask by VOICE (fake mic plays the clip) ===
+  user: What is your name?
+  agent: I
+=== output level (app FFT visualiser) ===
+  peak while the agent was speaking: 78.0%
+  PASS — the agent's voice is arriving
+```
+
+Chrome loops the fake-capture file, so the clip is **padded with silence**
+(`ask_name_once.wav` = 1.5 s phrase + 20 s silence) — otherwise the question
+repeats back to back and the transcript is unreadable.
+
+The output-level check matters most. It reads the app's own FFT visualiser,
+which is fed from the SDK's output analyser, so it is the only in-app evidence
+that the agent's voice actually reached the client. **0% while the agent reports
+`speaking` means the agent's TTS is not arriving** even though ASR, the LLM and
+the text channel are all working — which is exactly what a bad `voice.voice_id`
+looks like. That is how the `test` agent's broken voice was found: swapping
+`Selene` (`b347db03…`) for `Happy Girl` (`1621cae2…`) took the output level from
+0% to 78%.
+
+> Config patches are **draft-only** — a `PATCH .../config` has no effect on live
+> sessions until you `POST .../publish`. Easy to miss, and it looks exactly like
+> "my change did nothing".
+
 > **Model note.** The Agents / Live Call path does **not** use Drama 3, and
 > cannot be made to. `AgentVoiceConfigView` exposes only `voice_id`,
 > `speaking_language`, `expressive`, `speed` and `pronunciation_dictionary_ids`
@@ -303,6 +361,7 @@ tools/probe_duo.cjs      two-hander playback probe — no API, hand-built takes
 tools/probe_examples.cjs  synthesize the complex examples end to end (1 call each)
 tools/probe_call.cjs      drive the real Live Call UI and unwrap the error chain
 tools/probe_call_failures.cjs  stub each call failure, check the message names it
+tools/probe_call_voice.cjs  ask by text, then ask by voice (fake-mic TTS clip)
 tools/verify_stream.cjs  streaming regression harness (7 checks)
 tools/echo_upstream.py   recording stub that stands in for api.fish.audio
 tools/probe_model.cjs    drives the real UI and asserts the `model` header sent
@@ -369,9 +428,18 @@ can fail — a busy microphone, a denied one, no microphone, a vanished device, 
 insecure origin — drives the real UI, and asserts the toast names the actual
 cause rather than repeating the SDK's one-size-fits-all message. It also proves
 the healthy path still connects, so the error handling cannot be "fixed" by
-breaking the success path. No API credit: the failures all happen before the
-session is used.
+breaking the success path — and it snapshots the account's sessions before and
+after to assert the run leaves **nothing** pending. No API credit: the failures
+all happen before the session is used.
 
 `probe_call.cjs` is the manual diagnosis tool for a call that will not start. It
 mints a session token, checks the mic, runs the SDK, and prints the whole
-unwrapped error chain — the thing the app used to throw away.
+unwrapped error chain — the thing the app used to throw away. It releases the
+sessions it creates.
+
+`probe_call_voice.cjs` is the other half: the call *starts* fine, but is anyone
+audible? It plays a TTS clip into the fake microphone so the agent hears a real
+question, asks it by text first and then by voice, and reports the app's own
+output level. It is what distinguishes "the call is broken" from "the agent's
+voice is broken" — see the Live Call section. It hangs up through the UI and
+releases its session.

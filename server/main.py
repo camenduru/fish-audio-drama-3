@@ -358,6 +358,23 @@ async def create_session(request: Request) -> Response:
     )
 
 
+@app.post("/api/sessions/{session_id}/end")
+async def end_session(session_id: str) -> Response:
+    """Hang up a session.
+
+    Needed because a failed start leaks one: the SDK mints a token, then gives
+    up before joining the room without telling the server, so the session sits
+    in `pending` until the server-side room_join_timeout. A user who retries a
+    broken call a few times fills their session list with abandoned calls. The
+    client calls this from its own failure path.
+    """
+    headers = {"Authorization": _auth_headers()["Authorization"]}
+    upstream = await _client.post(f"{API_BASE}/v1/agent/sessions/{session_id}/end", headers=headers)
+    return Response(
+        content=upstream.content, status_code=upstream.status_code, media_type="application/json"
+    )
+
+
 @app.post("/api/phone-calls")
 async def phone_calls(request: Request) -> Response:
     payload = await request.json()

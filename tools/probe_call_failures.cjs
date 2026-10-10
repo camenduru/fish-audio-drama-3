@@ -31,7 +31,18 @@ const CASES = [
   });
 
   const rows = [];
-  let fails = 0;
+
+  // Snapshot the account's sessions so we can prove the run leaves nothing behind.
+  const sessionIds = async p => new Set(
+    (await p.evaluate(async () => {
+      const d = await (await fetch('/api/fish/v1/agent/sessions?page_size=100')).json();
+      return (d.sessions || []).map(s => s.session_id);
+    })) || []);
+
+  const scout = await browser.newPage();
+  await scout.goto(APP + '/#live', { waitUntil: 'networkidle2' });
+  const before = await sessionIds(scout);
+  await scout.close();
 
   for (const c of CASES) {
     const page = await browser.newPage();
@@ -89,14 +100,39 @@ const CASES = [
   }
 
   console.log('\n================ what the user is told now ================');
+  let caseFails = 0;
   for (const r of rows) {
     const ok = r.inCall || ((r.hint || r.summary) && r.jsErrors === 0);
-    if (!ok) fails++;
+    if (!ok) caseFails++;
     console.log(`${ok ? 'PASS' : 'FAIL'}  ${r.case.padEnd(20)} inCall=${String(r.inCall).padEnd(5)} ` +
                 `code=${(r.code || '—').padEnd(20)} root=${(r.root || '—').padEnd(20)}`);
     console.log(`        toast: ${r.toast || '(none)'}`);
   }
-  console.log(`\n${rows.length - fails}/${rows.length} cases give an actionable message`);
+
+  // A failed start must not leave a session behind: the token is minted before
+  // the connect, so without the client's cleanup every retry of a broken call
+  // adds another abandoned session to the account.
+  const scout2 = await browser.newPage();
+  await scout2.goto(APP + '/#live', { waitUntil: 'networkidle2' });
+  await sleep(2500);   // let the fire-and-forget /end land
+  const after = await scout2.evaluate(async () => {
+    const d = await (await fetch('/api/fish/v1/agent/sessions?page_size=100')).json();
+    return (d.sessions || []).map(s => ({
+      id: s.session_id, status: s.status, reason: s.end_reason, created: s.created_at,
+    }));
+  });
+  await scout2.close();
+
+  const fresh = after.filter(s => !before.has(s.id));
+  const leaked = fresh.filter(s => s.status === 'pending');
+  console.log(`\n================ session leak ================`);
+  console.log(`created during this run: ${fresh.length}`);
+  for (const s of fresh) console.log(`   ${s.status.padEnd(9)} reason=${s.reason}  ${s.id}`);
+  console.log(`${leaked.length === 0 ? 'PASS' : 'FAIL'}  no abandoned sessions left behind` +
+              (leaked.length ? ` — ${leaked.length} still pending` : ''));
+  const fails = caseFails + (leaked.length ? 1 : 0);
+
+  console.log(`\n${rows.length - caseFails}/${rows.length} cases give an actionable message`);
   await browser.close();
   process.exit(fails ? 1 : 0);
 })().catch(e => { console.error('PROBE ERROR', e); process.exit(1); });

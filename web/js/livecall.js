@@ -7,6 +7,7 @@ let session = null;
 let rafId = null;
 let agents = [];
 let lastError = null;    // the last start failure, unwrapped — see describeCallError
+let mintedSessionId = null;  // a session token we minted but never handed to the SDK
 
 const CDNS = [
   'https://esm.sh/@fishaudio/agent-client@latest',
@@ -217,8 +218,12 @@ async function startCall() {
       session = await AgentSession.start(opts);
     } else {
       const token = await apiFetch('/api/sessions', { method: 'POST', body: { agent_id: agentId } });
+      // Remember the id: if the connect below fails, the token has already
+      // minted a session server-side and nothing else will release it.
+      mintedSessionId = token?.session_id || null;
       session = await AgentSession.start({ ...opts, sessionToken: token });
     }
+    mintedSessionId = null;    // the SDK owns it from here
     $('#liveSid').textContent = session.sessionId || '—';
     $('#liveTransport').textContent = 'livekit (WebRTC)';
     toggleLiveUi(true);
@@ -230,6 +235,14 @@ async function startCall() {
     console.error('[livecall] start failed', e);
     toast('Could not start call: ' + describeCallError(e), 'err');
     toggleLiveUi(false);
+    // Release the session the failed attempt already minted, so retrying a
+    // broken call does not pile abandoned sessions onto the account.
+    if (mintedSessionId) {
+      const sid = mintedSessionId;
+      mintedSessionId = null;
+      apiFetch(`/api/sessions/${encodeURIComponent(sid)}/end`, { method: 'POST' })
+        .catch(() => {});          // best effort: the server times it out anyway
+    }
   } finally {
     btn.disabled = false; btn.textContent = '🎙 Start call';
   }

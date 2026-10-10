@@ -108,6 +108,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   console.log(JSON.stringify(out, null, 2));
 
+  // This probe mints a session directly (not through the UI), so it must
+  // release it itself — otherwise every run leaves a pending session behind.
+  if (out?.token?.session_id) {
+    const ended = await page.evaluate(async sid => {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/end`, { method: 'POST' });
+      return r.status;
+    }, out.token.session_id);
+    console.log(`released probe session ${out.token.session_id} -> HTTP ${ended}`);
+  }
+
   // ------------------------------------------------ the real UI, exactly as a user
   console.log('\n=== driving the real UI ===');
   await page.goto(APP + '/#live', { waitUntil: 'networkidle2' });
@@ -128,6 +138,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     status: ui.status, live: ui.live, sessionId: ui.sessionId,
     lastError: ui.lastError, toasts: ui.toasts,
   }, null, 2));
+
+  // Hang up through the app itself, or the browser closing leaves the session
+  // `active` on the account until the server times it out.
+  if (ui.sessionId) {
+    await page.click('#liveEnd').catch(() => {});
+    await sleep(1500);
+    const done = await page.evaluate(() => window.__livecall?.().live);
+    console.log(`hung up ${ui.sessionId} via the UI (call UI released: ${done === false})`);
+  }
 
   if (logs.length) console.log('\n--- console ---\n' + logs.slice(0, 25).join('\n'));
 
