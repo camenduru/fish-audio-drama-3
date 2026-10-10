@@ -1,6 +1,7 @@
 // livecall.js — in-browser voice calls with @fishaudio/agent-client
 
 import { $, el, toast, apiFetch, fish, localStore, localSave } from './api.js';
+import { attachTagButton } from './tags.js';
 
 let SDK = null;          // module namespace
 let session = null;
@@ -398,6 +399,12 @@ export function initLive() {
   $('#liveSend').addEventListener('click', sendText);
   $('#liveText').addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
   $('#liveText').addEventListener('input', () => session?.sendUserActivity?.());
+  // Directions work on typed turns too, so the library is worth having here.
+  const liveText = $('#liveText');
+  liveText.parentElement?.insertBefore(
+    attachTagButton(liveText, { label: 'the message box' }),
+    $('#liveSend'),
+  );
   $('#liveToolEvents').addEventListener('change', () => toast('Takes effect on the next call.'));
   $('#liveTextOnly').addEventListener('change', () => toast('Takes effect on the next call.'));
   loadAgentOptions();

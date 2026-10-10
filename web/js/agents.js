@@ -2,6 +2,7 @@
 
 import { $, el, toast, modal, close, fish, esc, fmtBytes, fmtTime } from './api.js';
 import { openVoicePicker } from './voicepicker.js';
+import { attachTagButton } from './tags.js';
 
 const SPEAKING_LANGS = ['en','ja','zh','ko','es','fr','de','pt','it','nl','ar','hi','id','tr','ru','bg','sr','hr','cs','sk','pl','uk','ro','hu','el','sv','da','no','fi','et','lv','lt','ca','he','fa','ur','kk','ka','hy','bn','ta','te','kn','mr','gu','pa','ne','th','vi','ms','tl','af'];
 const LLM_MODELS = ['google/gemini-3.5-flash-lite','google/gemini-3.6-flash','google/gemini-2.5-flash','google/gemma-4-26b-a4b-it','anthropic/claude-haiku-4.5','anthropic/claude-sonnet-4.6','openai/gpt-5.6-luna','openai/gpt-4o','openai/gpt-4.1'];
@@ -21,6 +22,9 @@ const sw = (label, checked, onchange) => {
   return el('label.switch', { style: 'margin-bottom:10px' }, [c, el('span.track'), label]);
 };
 const ta = (value, rows, oninput) => el('textarea.textarea.mono', { value: value ?? '', rows, oninput: e => oninput?.(e.target.value) });
+// A prompt field with the complex-tag library attached: an agent's first
+// message is spoken, so directions and sound tags belong in it too.
+const withTags = (field, label) => el('div.flex.aic.gap', {}, [field, attachTagButton(field, { label })]);
 const section = (title, children) => el('div.card.mb', {}, [el('div.card-h', {}, title), el('div.card-b', {}, children)]);
 const tabBtn = (id, label) => el('div.tab' + (view.tab === id ? '.active' : ''), { onclick: () => { view.tab = id; openAgent(view.agentId, true); } }, label);
 
@@ -99,7 +103,7 @@ function newAgentModal() {
       f('System prompt', prompt, 'The agent’s instructions. Keep it speech-friendly.'),
       el('div.row', {}, [f('Voice id', voice), f('Speaking language', lang)]),
       el('div.row', {}, [f('LLM', llm), f('First message mode', firstMode)]),
-      f('First message', firstMsg),
+      f('First message', withTags(firstMsg, 'the first message')),
     ]),
     footer: [el('button.btn', { onclick: close }, 'Cancel'), create],
   });
@@ -224,7 +228,11 @@ async function renderConfig(id, agent, cfg, panel) {
       el('div.row', {}, [f('Name', inp(agent.name, null, { oninput: e => draft.name = e.target.value })), f('Description', inp(agent.description || '', null, { oninput: e => draft.description = e.target.value }))]),
       el('div.row', {}, [f('Public', sw('Enabled', !!agent.public_enabled, x => draft.public_enabled = x)), f('Allowed origins', inp((agent.allowed_origins || []).join(', '), null, { oninput: e => draft.allowed_origins = e.target.value.split(',').map(s => s.trim()).filter(Boolean), placeholder: 'https://app.example.com' }))]),
     ]),
-    section('🧠 Prompt', [f('System prompt', systemPrompt), el('div.row', {}, [f('First message mode', firstMode), f('First message prompt', firstPrompt)]), f('First message', firstMsg)]),
+    section('🧠 Prompt', [
+      f('System prompt', withTags(systemPrompt, 'the system prompt')),
+      el('div.row', {}, [f('First message mode', firstMode), f('First message prompt', withTags(firstPrompt, 'the first message prompt'))]),
+      f('First message', withTags(firstMsg, 'the first message')),
+    ]),
     section('🎙 Voice', [el('div.row', {}, [f('Voice id', voiceRow), f('Speaking language', lang)]),
       el('label.field', {}, [el('span', {}, 'Speed · ', el('b', { id: 'agSpeedVal' }, (+(v.speed ?? 1)).toFixed(2))), speed]), expressive]),
     section('🤖 Model', [f('LLM', llmSel)]),

@@ -4,6 +4,7 @@ import { $, el, toast, modal, close, apiFetch, downloadBlob, fish } from './api.
 import * as D3 from './drama3.js';
 import * as A from './audio.js';
 import { openVoicePicker } from './voicepicker.js';
+import { openTagPicker, insertIntoField } from './tags.js';
 
 const scene = { speakers: [], lastBlob: null };
 let assigning = false;   // guards the voice-library fetch against double-clicks
@@ -250,6 +251,10 @@ export function initScenes() {
   const main = $('#sceneSpeakers').parentElement;
   const scriptBox = el('div.card.mb', {}, [
     el('div.card-h', {}, [el('span', {}, '🎬 Scene script'), el('div.grow'),
+      el('button.btn.sm.ghost', { id: 'sceneTags', title: 'Browse ready-made complex tags — including whole multi-speaker scenes', onclick: () => {
+        const ta = $('#sceneScript');
+        openTagPicker({ target: ta, onInsert: (text, wrap) => insertIntoField(ta, text, wrap) });
+      } }, '🏷 Complex tags'),
       el('button.btn.sm.ghost', { onclick: detectSpeakers }, 'Detect speakers')]),
     el('div.card-b', {}, [
       el('textarea.textarea.mono', { id: 'sceneScript', rows: 12, placeholder: 'Mom: [suspiciously calm] Who ate the last slice of cake?\nKid: [way too fast] Maybe the dog. Dogs love cake.\nMom: [pause] We don\'t have a dog.' }),
@@ -270,6 +275,7 @@ export function initScenes() {
   // throws away a voice already assigned to a speaker.
   const scriptEl = $('#sceneScript');
   if (scriptEl) {
+    scriptEl.dataset.tagLabel = 'the scene script';   // named in the tag picker
     let pending = null;
     scriptEl.addEventListener('input', () => {
       clearTimeout(pending);

@@ -9,6 +9,7 @@ import { initExamples } from './examples.js';
 import { initLipsync } from './lipsync.js';
 import { initAgents } from './agents.js';
 import { initLive } from './livecall.js';
+import { initTagPicker } from './tags.js';
 
 const VIEWS = {
   studio:  { title: 'Drama 3 Studio', sub: 'Direct a performance in plain language' },
@@ -123,6 +124,7 @@ function boot() {
   initLipsync();
   initAgents();
   initLive();
+  initTagPicker();
 
   route(location.hash.slice(1) || 'studio');
   refreshStatus();

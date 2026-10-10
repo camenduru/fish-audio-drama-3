@@ -4,6 +4,7 @@ import { $, el, toast, esc } from './api.js';
 import { highlight } from './drama3.js';
 import { setScript, generate } from './studio.js';
 import { loadSceneScript } from './scenes.js';
+import { openTagPicker, TAG_CATEGORIES, TAG_TOTAL } from './tags.js';
 
 export const FEATURES = [
   {
@@ -159,6 +160,14 @@ export const FEATURES = [
       },
     ],
   },
+  // The library is rendered from web/js/tags.js rather than restated here, so a
+  // tag and its example can never drift apart — adding one to the picker adds it
+  // to this page.
+  {
+    n: '13', icon: '🏷', title: 'Complex tags — the whole library',
+    blurb: `Every one of the ${TAG_TOTAL} ready-made combinations, grouped exactly as the picker groups them. Each is a complete line you can load and hear — the same text the 🏷 button drops at your cursor. Load one, then rewrite the words around it and keep the shape.`,
+    library: true,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -210,10 +219,87 @@ function featureBlock(feature) {
   ]);
 }
 
+/**
+ * One tag from the library, as a card you can load and hear.
+ *
+ * `example` wins over `text` when a tag is a bare fragment — you cannot hear
+ * [short pause] on its own, so the library carries a line that shows the beat
+ * in place. Everything else is already a complete line, and showing exactly
+ * what the picker would insert is the point.
+ */
+function tagExampleCard(tag, cat) {
+  const script = tag.example || tag.text;
+  const isScene = !!cat.scene;
+
+  const code = el('pre.example-script', { html: highlight(script) });
+  const load = el('button.btn.sm.primary', { onclick: () => {
+    if (isScene) {
+      document.querySelector('[data-view="scenes"]').click();
+      loadSceneScript(script);
+      toast('Loaded into Scenes.');
+    } else {
+      document.querySelector('[data-view="studio"]').click();
+      setScript(script);
+      toast('Loaded into the studio.');
+    }
+  } }, isScene ? 'Open in Scenes →' : 'Load into studio →');
+
+  const hear = el('button.btn.sm', { title: 'Load and synthesize (needs API credit)', onclick: async () => {
+    if (isScene) { document.querySelector('[data-view="scenes"]').click(); loadSceneScript(script); toast('Press “Render scene”.'); return; }
+    document.querySelector('[data-view="studio"]').click();
+    setScript(script);
+    await generate();
+  } }, '▶ Hear it');
+
+  const copy = el('button.btn.sm.ghost', { title: 'Copy', onclick: () => { navigator.clipboard?.writeText(script); toast('Copied.'); } }, '⧉');
+
+  return el('div.example-card', {}, [
+    el('div.example-label', {}, [
+      el('span', {}, tag.label),
+      tag.example ? el('span.pill', { title: 'The library carries a full line for this fragment' }, 'fragment') : null,
+    ]),
+    code,
+    tag.note ? el('div.example-note', {}, tag.note) : null,
+    el('div.flex.gap', { style: 'margin-top:10px;flex-wrap:wrap' }, [load, hear, copy]),
+  ]);
+}
+
+/** The whole tag library, grouped exactly as the picker groups it. */
+function tagLibraryBlock(feature) {
+  const groups = TAG_CATEGORIES.map((c, i) => el('details.tag-cat', { open: i === 0 }, [
+    el('summary', {}, [
+      el('span', {}, c.icon),
+      el('span', {}, c.title),
+      el('span.pill', {}, String(c.tags.length)),
+      el('div.grow'),
+      el('span.tag-cat-blurb', {}, c.blurb || ''),
+    ]),
+    el('div.tag-cat-b', {}, c.tags.map(t => tagExampleCard(t, c))),
+  ]));
+
+  return el('div.card.mb', {}, [
+    el('div.card-h', {}, [
+      el('span.badge.accent', {}, feature.n),
+      el('span', {}, feature.icon + ' ' + feature.title),
+      el('div.grow'),
+      el('span.hint', {}, `${TAG_TOTAL} tags · ${TAG_CATEGORIES.length} categories`),
+    ]),
+    el('div.card-b', {}, [
+      el('div.hint.mb', { style: 'font-size:12.5px' }, feature.blurb),
+      el('div.flex.gap.mb', { style: 'flex-wrap:wrap' }, [
+        el('button.btn.sm.primary', { onclick: () => openTagPicker() }, '🏷 Open the picker'),
+        el('button.btn.sm', { onclick: () => groups.forEach(g => { g.open = true; }) }, 'Expand all'),
+        el('button.btn.sm.ghost', { onclick: () => groups.forEach(g => { g.open = false; }) }, 'Collapse all'),
+      ]),
+      ...groups,
+    ]),
+  ]);
+}
+
 export function initExamples() {
   const box = $('#exList');
   if (!box) return;
-  box.replaceChildren(...FEATURES.map(featureBlock));
+  box.replaceChildren(...FEATURES.map(f => (f.library ? tagLibraryBlock(f) : featureBlock(f))));
 
   const nav = $('#exNav');
   if (nav) {
@@ -233,9 +319,17 @@ export function initExamples() {
       ['<|speaker:0|>', 'Speaker turn in a multi-speaker scene'],
       ['Name: line', 'Scene shorthand — converted to speaker tags'],
     ];
-    tags.replaceChildren(...rows.map(([tag, desc]) => el('div', { style: 'margin-bottom:10px' }, [
-      el('div.mono', { style: 'font-size:11.5px;color:var(--teal)' }, tag),
-      el('div.hint', {}, desc),
-    ])));
+    tags.replaceChildren(
+      el('button.btn.primary.sm', {
+        style: 'width:100%;margin-bottom:8px',
+        onclick: () => openTagPicker(),
+      }, `🏷 Complex tag library (${TAG_TOTAL})`),
+      el('div.hint', { style: 'margin-bottom:14px' },
+        'The grammar is above; the library is the lines already built from it — click any tag to drop it at your cursor.'),
+      ...rows.map(([tag, desc]) => el('div', { style: 'margin-bottom:10px' }, [
+        el('div.mono', { style: 'font-size:11.5px;color:var(--teal)' }, tag),
+        el('div.hint', {}, desc),
+      ])),
+    );
   }
 }

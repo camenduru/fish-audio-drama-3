@@ -5,6 +5,7 @@ import * as D3 from './drama3.js';
 import * as A from './audio.js';
 import * as L from './library.js';
 import { openVoicePicker as openVoicePickerShared } from './voicepicker.js';
+import { openTagPicker, attachTagButton } from './tags.js';
 
 export const state = {
   model: 'drama-3-preview',
@@ -67,6 +68,20 @@ function buildTagbar() {
   frag.push(el('button.btn.primary.sm', { id: 'genBtn', onclick: generate }, ['▶ Generate']));
   frag.push(el('button.btn.sm', { id: 'fixBtn', onclick: openInpaint, title: 'Select a span in the script, then fix just that moment' }, ['✂ Fix a moment']));
   frag.push(el('button.btn.sm', { id: 'autoBtn', onclick: runAutotag }, ['✨ Auto Tag']));
+  // The library button goes first among the tag chips: the chips below are the
+  // bare primitives, this is the shelf of ready-made combinations built from
+  // them. It inserts through the editor's own insert(), so the caret, the
+  // spacing and the highlight all behave exactly as the chips do.
+  frag.push(el('button.btn.sm', {
+    id: 'tagLibBtn',
+    title: 'Browse ready-made complex tags — directions, sound tags and scoped spans in one line',
+    onclick: () => openTagPicker({
+      target: editor,
+      onInsert: (text, wrap) => (wrap
+        ? insert({ open: wrap.open, close: wrap.close }, { wrap: true })
+        : insert(text)),
+    }),
+  }, ['🏷 Complex tags']));
   frag.push(el('span.sep'));
 
   for (const d of ['calm', 'excited', 'sad', 'angry', 'whisper-like', 'nervous']) {
@@ -347,7 +362,9 @@ function openInpaint() {
       ? 'The selected span is re-rendered with the new direction and spliced back into the current take.'
       : 'No base take loaded — the span is rendered on its own. Generate a full take first to splice.'),
     el('label.field', {}, [el('span', {}, 'Span to fix'), el('div.mono.hint', { style: 'background:var(--bg);padding:9px;border-radius:7px' }, sel)]),
-    el('label.field', {}, [el('span', {}, 'New direction'), dir]),
+    el('label.field', {}, [el('span', {}, 'New direction'), el('div.flex.aic.gap', {}, [
+      dir, attachTagButton(dir, { label: 'the new direction' }),
+    ])]),
     list,
     el('div.flex.gap', { style: 'flex-wrap:wrap' },
       ['shocked, voice dropping to a whisper', 'pause before it, deadpan', 'genuinely excited', 'slower, drawing it out'].map(d =>
@@ -391,6 +408,8 @@ export function initStudio() {
   editor = $('#editor');
   hl = $('#editorHL');
   playerEl = $('#player');
+  // So the tag picker can name its target instead of quoting the placeholder.
+  editor.dataset.tagLabel = 'the script editor';
 
   buildTagbar();
   editor.addEventListener('input', syncHighlight);
