@@ -9,6 +9,7 @@ import { initExamples } from './examples.js';
 import { initLipsync } from './lipsync.js';
 import { initAgents } from './agents.js';
 import { initLive } from './livecall.js';
+import { initVrmCall } from './vrmcall.js';
 import { initTagPicker } from './tags.js';
 
 const VIEWS = {
@@ -20,6 +21,7 @@ const VIEWS = {
   lipsync: { title: 'Lip Sync',       sub: 'Bake game-ready mouth tracks from a line' },
   agents:  { title: 'Agents',         sub: 'Design, publish and monitor voice agents' },
   live:    { title: 'Live Call',      sub: 'Talk to an agent in the browser' },
+  vrmcall: { title: 'VRM Call',       sub: 'Give the agent a VRM body and talk to it' },
   settings:{ title: 'Setup',          sub: 'API key, account and API coverage' },
 };
 
@@ -124,6 +126,7 @@ function boot() {
   initLipsync();
   initAgents();
   initLive();
+  initVrmCall();
   initTagPicker();
 
   route(location.hash.slice(1) || 'studio');

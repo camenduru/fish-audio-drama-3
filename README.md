@@ -322,6 +322,47 @@ looks like. That is how the `test` agent's broken voice was found: swapping
 > server-side. Drama 3 applies to the `/v1/tts` paths (studio, scenes, streaming,
 > inpainting, zero-shot) only.
 
+### VRM Call (`vrmcall`)
+The same live call as **Call**, with the agent given a body. Add your own `.vrm`
+(drag & drop, the file picker, or a URL) and it renders in the browser; the
+agent's voice drives its mouth while you talk.
+
+The call is not a second implementation. `web/js/agentcall.js` holds the whole
+call lifecycle — the unwrapped error reporting, the microphone probe and
+text-first fallback, the session-leak cleanup, the transcripts and the client
+tools — and each page binds it to a set of element ids (`live*` / `vrm*`) plus an
+`onLevel` hook. The Call page draws that level as bars and an orb; this page feeds
+it to the avatar.
+
+What the avatar does, and where it comes from (`web/js/vrmcall.js`):
+
+| | |
+| --- | --- |
+| viewer | three.js + `@pixiv/three-vrm` through `GLTFLoader` + `VRMLoaderPlugin`, `rotateVRM0`, then `vrm.update(delta)` every frame — ChatVRM's load path |
+| lip sync | the SDK's output level (`getOutputVolume()`, with `getOutputFrequencyData()` as a floor), shaped by a gamma, then an asymmetric smoother (fast attack, slower release) into the VRM `aa` expression — only `aa`, as ChatVRM does |
+| blink | auto-blink on the `blink` expression; shut for ~0.12 s, then reopened after 2–5 s (ChatVRM's `BLINK_CLOSE_MAX` / `BLINK_OPEN_MAX`) |
+| look-at | an `Object3D` parented to the camera becomes `vrm.lookAt.target`, so the eyes converge on you and keep following while you orbit |
+| idle | a slow chest sway and breathing on the normalized bones — deliberately procedural, not a `.vrma` clip, because shipping an idle animation drags in an asset licence the studio does not need. The head is left to `VRMLookAt`; animating it here would fight the gaze |
+
+Nothing is pre-rendered, so the mouth stops when the agent stops.
+
+- **three.js loads on demand.** `index.html` carries an import map pinning
+  `three@0.180.0` and `@pixiv/three-vrm@3.5.5`; nothing is fetched until the page
+  is first opened. The bare specifiers matter: they are what makes `GLTFLoader`,
+  three-vrm and the renderer share *one* three.js instance (two copies fail
+  `instanceof` checks deep inside three-vrm).
+- **Your model is remembered** in IndexedDB, so a 10 MB VRM does not have to be
+  re-picked after a reload. **✕ Remove** clears it.
+- **Mouth gain** is a per-model fader — VRM `aa` shapes differ a lot in how far
+  they open.
+- The call itself (mic, errors, text-only fallback) behaves exactly as on the
+  Call page, including the failure path that releases a minted session.
+
+> ChatVRM peaks the time-domain samples and pushes them through a sigmoid. That
+> is the same *idea* — a level, shaped, into `aa` — but the SDK already hands us a
+> 0–1 level, so a gamma replaces the sigmoid; the sigmoid's input range does not
+> exist here.
+
 ## Which model does each generation path use?
 
 `DEFAULT_MODEL = "drama-3-preview"` in `server/main.py` is the single source of
@@ -358,7 +399,9 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/convo.js       conversation-script parsing (DOM-free, unit-tested)
   js/examples.js    all 12 Drama 3 features as loadable examples
   js/agents.js      agents console
-  js/livecall.js    Web SDK live calls
+  js/agentcall.js   the call lifecycle both call pages share
+  js/livecall.js    the Live Call page (binds agentcall to the live* ids)
+  js/vrmcall.js     the VRM Call page: a three.js/three-vrm avatar whose mouth the call drives
 tools/visemes.py    the Fish-anchored viseme baker (openfacefx + allosaurus)
 tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
 tools/bake_debug.py run the baker directly and print the real traceback
@@ -389,6 +432,7 @@ NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 33/33, no credit ne
 NODE_PATH=.../node_modules node tools/probe_duo.cjs        # two-hander + min-hold, no credit needed
 NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # needs real API credit
 NODE_PATH=.../node_modules node tools/probe_call_failures.cjs   # call errors, no credit
+NODE_PATH=.../node_modules node tools/probe_vrm.cjs avatar.vrm   # the VRM avatar, no credit
 python tools/compare_bakers.py                                    # viseme correctness, no credit
 python tools/compare_bakers.py --endpoint http://127.0.0.1:8756   # + the shipped HTTP path
 ```
@@ -452,3 +496,14 @@ question, asks it by text first and then by voice, and reports the app's own
 output level. It is what distinguishes "the call is broken" from "the agent's
 voice is broken" — see the Live Call section. It hangs up through the UI and
 releases its session.
+
+`probe_vrm.cjs` is the avatar's harness. It opens the VRM Call page, loads a
+`.vrm` through the **real file picker**, asserts the metadata parsed and that the
+render loop is drawing (`triangles > 0`), drives a level down the same wire the
+call's `onLevel` writes to and asserts it reaches the VRM `aa` expression and
+closes again in silence, waits for an auto-blink, and then switches to the Live
+Call page to prove it is unharmed. No API key and no credit: a call cannot be
+started headlessly without a microphone and an agent, so the level is injected
+through `window.__vrmcall.feed()` — everything downstream of that point is the
+shipped path. On a machine without a GPU (a VM or CI box), pass software WebGL:
+`CHROME_ARGS="--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader"`.

@@ -6,6 +6,16 @@
 <title>Fish Audio · Drama 3 Studio</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="/css/styles.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.js",
+    "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.5.5/lib/three-vrm-animation.module.js"
+  }
+}
+</script>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎭</text></svg>">
 </head>
 <body>
@@ -46,6 +56,10 @@
     <button class="rail-btn" data-view="live">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></svg>
       Call
+    </button>
+    <button class="rail-btn" data-view="vrmcall">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7" r="4"/><path d="M5.5 21v-1.5a6.5 6.5 0 0 1 13 0V21"/><path d="M9.5 13.2 12 17.5l2.5-4.3"/></svg>
+      VRM Call
     </button>
     <button class="rail-btn" data-view="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -495,6 +509,88 @@
           </div></details>
           <details class="side-section" open><summary>ℹ️ Notes</summary><div class="side-body">
             <div class="hint">Public agents connect straight from the browser. Private agents use a session token minted by this server with your API key.</div>
+          </div></details>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ---------- VRM CALL ---------- -->
+    <section class="view" id="view-vrmcall">
+      <div class="studio">
+        <div class="studio-main">
+          <div class="pad flex aic gap" style="border-bottom:1px solid var(--line);flex-wrap:wrap">
+            <select class="select" id="vrmAgent" style="max-width:280px"></select>
+            <button class="btn primary" id="vrmStart">🎙 Start call</button>
+            <button class="btn danger hidden" id="vrmEnd">■ End</button>
+            <button class="btn hidden" id="vrmMute">🔇 Mute</button>
+            <div class="grow"></div>
+            <span class="badge" id="vrmModelBadge">no model</span>
+            <span class="badge" id="vrmStatus">idle</span>
+          </div>
+          <div class="scroll grow pad">
+            <div class="vrm-stage" id="vrmStage">
+              <canvas class="vrm-canvas" id="vrmCanvas"></canvas>
+              <input type="file" id="vrmFile" accept=".vrm,.glb,.gltf,model/gltf-binary,application/octet-stream" hidden>
+              <div class="vrm-hud">
+                <span class="badge" id="vrmMode">—</span>
+              </div>
+              <div class="vrm-empty" id="vrmEmpty">
+                <div class="big">🧍</div>
+                <div>Drop a <b>.vrm</b> model here</div>
+                <div class="hint">or</div>
+                <button class="btn" id="vrmPick">📁 Choose a VRM file</button>
+                <div class="hint mt" style="max-width:340px">It renders in the browser, and its mouth is driven by the agent's real voice on the call.</div>
+              </div>
+            </div>
+            <div class="vrm-bar">
+              <span class="hint">drag to orbit · scroll to zoom</span>
+              <div class="grow"></div>
+              <span class="hint" id="vrmCallHint">Load a model, pick an agent and start a call — the avatar speaks with the agent's voice.</span>
+            </div>
+
+            <div class="flex gap mt" style="max-width:760px;margin:16px auto 0">
+              <input class="input" id="vrmText" placeholder="Type instead of talking…" disabled>
+              <button class="btn" id="vrmSend" disabled>Send</button>
+            </div>
+            <div class="chat" id="vrmChat" style="max-width:760px;margin:12px auto 24px"></div>
+          </div>
+        </div>
+        <aside class="studio-side">
+          <details class="side-section" open><summary>🧍 Model</summary><div class="side-body">
+            <div class="flex gap mb" style="flex-wrap:wrap">
+              <button class="btn sm" id="vrmPick2">📁 Choose a VRM</button>
+              <button class="btn sm ghost" id="vrmClear">✕ Remove</button>
+            </div>
+            <div id="vrmModelInfo"><div class="hint">No model loaded.</div></div>
+            <label class="field mt" style="margin-bottom:6px"><span>Load from URL</span>
+              <input class="input mono" id="vrmUrl" placeholder="https://…/avatar.vrm" style="font-size:11.5px">
+            </label>
+            <button class="btn sm" id="vrmLoadUrl">Load URL</button>
+            <div class="hint mt">Added models are remembered in this browser and come back on reload. Use a <span class="mono">.vrm</span> (VRM 0.x or 1.0).</div>
+          </div></details>
+
+          <details class="side-section" open><summary>🎭 Avatar</summary><div class="side-body">
+            <label class="field"><span>Mouth gain · <b id="vrmGainVal">1.00×</b></span>
+              <input type="range" id="vrmGain" min="0.2" max="2.5" step="0.05" value="1" style="width:100%"></label>
+            <div class="hint mb">How wide the mouth opens for a given voice level — tune it per model.</div>
+            <label class="switch mb"><input type="checkbox" id="vrmIdle" checked><span class="track"></span>Idle motion</label>
+            <div class="flex gap" style="flex-wrap:wrap">
+              <label class="switch" style="flex:1"><input type="checkbox" id="vrmBlink" checked><span class="track"></span>Auto blink</label>
+              <button class="btn sm" id="vrmBlinkNow" title="Force one blink">👁 Blink</button>
+            </div>
+            <button class="btn sm mt" id="vrmResetCam">⤢ Reset camera</button>
+          </div></details>
+
+          <details class="side-section" open><summary>📞 Session</summary><div class="side-body">
+            <div class="kv"><span class="k">Session</span><span class="v mono" id="vrmSid">—</span></div>
+            <div class="kv"><span class="k">Transport</span><span class="v" id="vrmTransport">—</span></div>
+            <div class="kv"><span class="k">End reason</span><span class="v" id="vrmReason">—</span></div>
+            <label class="switch mt"><input type="checkbox" id="vrmToolEvents" checked><span class="track"></span>Show tool events</label>
+            <label class="switch mt"><input type="checkbox" id="vrmTextOnly"><span class="track"></span>Text only (no microphone)</label>
+          </div></details>
+
+          <details class="side-section" open><summary>ℹ️ How this works</summary><div class="side-body">
+            <div class="hint">This is the same live call as the <b>Call</b> page — same agents, same session, same mic and error handling. Only the output is different: instead of an orb and bars, the agent's output level drives a VRM avatar's <span class="mono">aa</span> mouth shape, with an auto-blink, a gaze that follows this camera, and a slow idle sway. Nothing about the avatar is pre-rendered; it moves while the agent talks.</div>
           </div></details>
         </aside>
       </div>
