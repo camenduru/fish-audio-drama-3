@@ -1,11 +1,18 @@
 /**
- * Prove the VRM Call page: a user's own .vrm renders, and the live call's output
- * level actually drives its mouth.
+ * Prove the VRM Call page: the bundled avatar renders with its bundled idle clip,
+ * a user's own .vrm loads over it, and the live call's output level drives its
+ * mouth.
+ *
+ * The baseline needs no arguments: `web/vrm/AvatarSample_B.vrm` is the default
+ * model and `web/vrm/idle_loop.vrma` the default animation, so the probe checks
+ * both on a fresh profile with no file picker and no stored model. Pass a .vrm to
+ * additionally cover the "my own model over the default" path.
  *
  * The call itself is verified by probe_call_failures / probe_call_text / probe_call_voice.
- * This probe covers what is new — three.js + @pixiv/three-vrm loading a user file,
- * the ChatVRM mouth/blink rig, and the fact that the Live Call page is untouched
- * by any of it. It needs no API key and no credit: nothing here starts a call.
+ * This probe covers what is new — three.js + @pixiv/three-vrm loading a file, the
+ * idle clip on a mixer, the ChatVRM mouth/blink rig, and the fact that the Live
+ * Call page is untouched by any of it. No API key and no credit: nothing here
+ * starts a call.
  *
  * A live call cannot be started headlessly without a microphone and an agent, so
  * the mouth is driven through `window.__vrmcall.feed(level)` — the exact hook the
@@ -32,11 +39,10 @@ const check = (name, ok, detail = '') => {
 };
 
 (async () => {
-  if (!MODEL) {
-    console.error('Give me a model: node tools/probe_vrm.cjs path/to/avatar.vrm');
-    process.exit(2);
-  }
-  if (!fs.existsSync(MODEL)) { console.error('no such model file:', MODEL); process.exit(2); }
+  // A model argument is optional: the page now ships both an avatar and an idle
+  // clip, and that baseline is what gets checked first. A path only adds the
+  // "user model over the default" case.
+  if (MODEL && !fs.existsSync(MODEL)) { console.error('no such model file:', MODEL); process.exit(2); }
 
   const browser = await puppeteer.launch({
     executablePath: CHROME, headless: 'new',
@@ -67,6 +73,21 @@ const check = (name, ok, detail = '') => {
     }
     return false;
   };
+  // A real OrbitControls drag on the canvas. The gaze target is parented to the
+  // camera, so moving the camera is the only way to prove the eyes are still
+  // tracking the viewer while the idle clip plays.
+  const dragCanvas = async dx => {
+    const box = await page.$eval('#vrmCanvas', e => {
+      const r = e.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i++) { await page.mouse.move(cx + (dx / 10) * i, cy); await sleep(16); }
+    await page.mouse.up();
+    await sleep(600);
+  };
   // Anything on this page is timed against frames, never the wall clock, so the
   // probe does not depend on the machine's frame rate.
   const waitFrames = async n => {
@@ -79,22 +100,92 @@ const check = (name, ok, detail = '') => {
 
   check('rail has a VRM Call button', !!(await page.$('[data-view="vrmcall"]')));
   check('the page opens', await load('vrmcall'));
-  check('prompts for a model when none is loaded', !!(await page.$('#vrmEmpty:not(.hidden)')));
   check('call controls are present', !!(await page.$('#vrmStart')) && !!(await page.$('#vrmAgent')));
 
   check('three.js boots on open', await waitFor(() => typeof window.__vrmcall === 'function', 40000));
 
-  // --- the user's own model, through the real file picker -------------------
-  const input = await page.$('#vrmFile');
-  if (!input) { console.error('FAIL  no #vrmFile input'); await browser.close(); process.exit(1); }
-  await input.uploadFile(MODEL);
-  const loaded = await waitFor(() => window.__vrmcall?.().model?.loaded === true, 120000);
-  check('the .vrm loads', loaded, JSON.stringify(await page.evaluate(() => window.__vrmcall?.().model)));
-  if (!loaded) {
-    console.log('model error:', JSON.stringify(await page.evaluate(() => window.__vrmcall?.().lastModelError)));
+  // --- the bundled default avatar, with no file picker and nothing stored ----
+  // A fresh browser profile has an empty IndexedDB, so this is exactly what a
+  // first visit sees.
+  const defaulted = await waitFor(() => window.__vrmcall?.().model?.source === 'default', 120000);
+  check('the bundled default avatar loads by itself', defaulted,
+        JSON.stringify(await page.evaluate(() => window.__vrmcall().model)));
+  if (!defaulted) {
+    console.log('model error:', JSON.stringify(await page.evaluate(() => window.__vrmcall().lastModelError)));
     console.log('console:', errors.slice(0, 6));
     await browser.close(); process.exit(1);
   }
+  check('the empty-state prompt is gone with a model loaded', !(await page.$('#vrmEmpty:not(.hidden)')));
+
+  // --- the bundled idle clip ------------------------------------------------
+  const idle = await page.evaluate(() => window.__vrmcall().idleClip);
+  check('the bundled idle clip is bound and playing on the mixer',
+        idle.loaded !== false && idle.tracks > 0 && idle.playing === true,
+        JSON.stringify({ tracks: idle.tracks, duration: idle.duration, playing: idle.playing }));
+
+  const t0 = await page.evaluate(() => window.__vrmcall().idleClip.time);
+  const c0 = await page.evaluate(() => window.__vrmcall().chest);
+  await sleep(1500);
+  const t1 = await page.evaluate(() => window.__vrmcall().idleClip.time);
+  const c1 = await page.evaluate(() => window.__vrmcall().chest);
+  check('the clip is advancing, not merely bound', t1 > t0, `${t0}s -> ${t1}s`);
+  check('the clip poses the body, not just the clock',
+        JSON.stringify(c0) !== JSON.stringify(c1), `chest ${JSON.stringify(c0)} -> ${JSON.stringify(c1)}`);
+
+  // The loader leaves the clip's hips translation absolute, in the source rig's
+  // frame; the page subtracts this model's rest hips so the body does not walk
+  // off the camera's target. A non-zero offset means that correction ran.
+  check('the clip\u2019s absolute hip offset was removed',
+        Array.isArray(idle.hipsOffset) && Math.abs(idle.hipsOffset[0]) > 0.05, JSON.stringify(idle.hipsOffset));
+
+  // --- the gaze still works with the clip playing ---------------------------
+  // The look-at applier writes the eyes and only the eyes, so a clip that turns
+  // the head would still leave the eyes on the viewer. Orbit the camera with a
+  // real drag and the eyes must follow.
+  const eye0 = await page.evaluate(() => window.__vrmcall().eyeRaw);
+  await dragCanvas(180);
+  const eye1 = await page.evaluate(() => window.__vrmcall().eyeRaw);
+  check('the gaze still converges on the camera while the clip plays',
+        JSON.stringify(eye0) !== JSON.stringify(eye1), `${JSON.stringify(eye0)} -> ${JSON.stringify(eye1)}`);
+
+  // Recorded because it is surprising and load-bearing: this .vrma animates 28
+  // channels but only 22 map to humanoid bones, so the head of this model cannot
+  // be moved by it at all. If that ever changes, the number here changes.
+  const headName = idle.boneNames?.head;
+  check('no track binds the head — this clip never mapped one',
+        !!headName && !(idle.trackNames || []).some(n => n.startsWith(headName)), headName);
+
+  // --- a user's own model, through the real file picker ---------------------
+  // Deliberately before the Remove check: with the default already loaded,
+  // "source === 'default'" is true both before and after a Remove, so asserting it
+  // there would pass instantly and let the pending clear clobber a later upload.
+  if (MODEL) {
+    const input = await page.$('#vrmFile');
+    if (!input) { console.error('FAIL  no #vrmFile input'); await browser.close(); process.exit(1); }
+    await input.uploadFile(MODEL);
+    const mine = path.basename(MODEL);
+    // Wait for the *uploaded* model specifically: the default is already loaded, so
+    // `model.loaded` alone would pass before the file is even parsed.
+    const loaded = await waitFor(n => window.__vrmcall?.().model?.loaded === true
+      && window.__vrmcall().model.source === 'file' && window.__vrmcall().model.name === n, 120000, mine);
+    check('the user\u2019s own .vrm loads over the default', loaded,
+          JSON.stringify(await page.evaluate(() => window.__vrmcall().model)));
+    if (!loaded) {
+      console.log('model error:', JSON.stringify(await page.evaluate(() => window.__vrmcall().lastModelError)));
+      console.log('console:', errors.slice(0, 6));
+      await browser.close(); process.exit(1);
+    }
+    const up = await page.evaluate(() => window.__vrmcall().idleClip);
+    check('the idle clip is rebuilt for the uploaded model', up.loaded !== false && up.tracks > 0 && up.playing === true,
+          JSON.stringify({ tracks: up.tracks, playing: up.playing }));
+
+    // --- "Remove" must fall back to the bundled avatar, not to a blank stage --
+    await page.click('#vrmClear');
+    const backToDefault = await waitFor(() => window.__vrmcall?.().model?.source === 'default', 60000);
+    check('removing the user\u2019s model restores the bundled default', backToDefault,
+          JSON.stringify(await page.evaluate(() => window.__vrmcall().model)));
+  }
+
   const info = await page.evaluate(() => window.__vrmcall());
   check('it parses as VRM with expressions and bones',
         info.model.expressions > 0 && info.model.bones > 0,

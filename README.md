@@ -323,9 +323,13 @@ looks like. That is how the `test` agent's broken voice was found: swapping
 > inpainting, zero-shot) only.
 
 ### VRM Call (`vrmcall`)
-The same live call as **Call**, with the agent given a body. Add your own `.vrm`
-(drag & drop, the file picker, or a URL) and it renders in the browser; the
-agent's voice drives its mouth while you talk.
+The same live call as **Call**, with the agent given a body. The page has one
+without being asked: `web/vrm/AvatarSample_B.vrm` is the default model and
+`web/vrm/idle_loop.vrma` the default idle animation, both served from the
+studio's own origin, so a first visit is a standing, breathing avatar rather than
+an empty stage. Add your own `.vrm` (drag & drop, the file picker, or a URL) and
+it renders in the browser instead; the agent's voice drives its mouth while you
+talk.
 
 The call is not a second implementation. `web/js/agentcall.js` holds the whole
 call lifecycle — the unwrapped error reporting, the microphone probe and
@@ -342,9 +346,48 @@ What the avatar does, and where it comes from (`web/js/vrmcall.js`):
 | lip sync | the SDK's output level (`getOutputVolume()`, with `getOutputFrequencyData()` as a floor), shaped by a gamma, then an asymmetric smoother (fast attack, slower release) into the VRM `aa` expression — only `aa`, as ChatVRM does |
 | blink | auto-blink on the `blink` expression; shut for ~0.12 s, then reopened after 2–5 s (ChatVRM's `BLINK_CLOSE_MAX` / `BLINK_OPEN_MAX`) |
 | look-at | an `Object3D` parented to the camera becomes `vrm.lookAt.target`, so the eyes converge on you and keep following while you orbit |
-| idle | a slow chest sway and breathing on the normalized bones — deliberately procedural, not a `.vrma` clip, because shipping an idle animation drags in an asset licence the studio does not need. The head is left to `VRMLookAt`; animating it here would fight the gaze |
+| idle | the bundled `.vrma` on a `THREE.AnimationMixer`, rebuilt for whichever model is loaded. If it cannot be fetched or parsed the rig falls back to the procedural chest sway it used before, so the page never sits stone still |
 
 Nothing is pre-rendered, so the mouth stops when the agent stops.
+
+#### Bundled avatar and idle clip
+
+Both files live in `web/vrm/` and are served by the same `StaticFiles` mount as
+the rest of the UI. They came from pixiv's ChatVRM (`public/`); ChatVRM's own
+LICENSE is MIT, but that covers its code, and neither file states terms of its own
+— `AvatarSample_B.vrm` is the VRoid sample model and `idle_loop.vrma` a VRM
+Animation sample, with no author or licence metadata in either container. They are
+recorded here rather than assumed.
+
+The idle path needed the separate `@pixiv/three-vrm-animation` package: a `.vrma`
+is a glTF carrying the `VRMC_vrm_animation` extension, and the plugin that reads it
+was removed from three-vrm's core after 1.x. A plain `GLTFLoader` parses such a
+file into an empty scene with no animation at all, which is what "the clip is not
+playing" looks like from the outside — the import map pins
+`@pixiv/three-vrm-animation@3.5.5` to match the three-vrm next to it.
+
+Two facts about this pair were measured, because the obvious assumptions are both
+wrong:
+
+- **The clip and the gaze never compete.** `VRMLookAtBoneApplier.applyYawPitch`
+  rotates `leftEye`/`rightEye` and nothing else — verified in 1.0.9 (what ChatVRM
+  pins) and in 3.5.5 (ours). So a clip that turns the head cannot fight the
+  look-at, and an earlier version of this page that dropped the clip's head and
+  neck tracks to "protect" the gaze was solving a problem that does not exist
+  while silently deleting real neck motion.
+- **The clip cannot turn this head anyway.** It animates 28 channels, but its
+  `head` channel targets a VRoid node that is not in the file's own humanoid map,
+  and a VRMA only carries humanoid bones — so the loader correctly binds nothing
+  for the head. 22 of the 28 channels survive as tracks (neck, spine, chest, arms,
+  legs, hips); the rest target nodes the spec has no way to reach. `probe_vrm.cjs`
+  asserts this, so it fails if a future clip does bind a head track.
+
+The clip does need one correction. The loader scales its hips translation to the
+model's hip height but leaves the value *absolute*, so played as-is it slides the
+body ~15 cm sideways off the origin the camera was framed on — the same "the
+animation's origin is offset" that ChatVRM works around by re-framing the camera
+after play. The offset is subtracted from the track instead, which keeps the sway
+(~2.7 cm) and leaves the avatar where it was framed.
 
 - **three.js loads on demand.** `index.html` carries an import map pinning
   `three@0.180.0` and `@pixiv/three-vrm@3.5.5`; nothing is fetched until the page
@@ -352,7 +395,9 @@ Nothing is pre-rendered, so the mouth stops when the agent stops.
   three-vrm and the renderer share *one* three.js instance (two copies fail
   `instanceof` checks deep inside three-vrm).
 - **Your model is remembered** in IndexedDB, so a 10 MB VRM does not have to be
-  re-picked after a reload. **✕ Remove** clears it.
+  re-picked after a reload. The bundled avatar is deliberately *not* cached — it
+  is already on disk. **✕ Remove** drops your model and brings the bundled one
+  back, so the stage is never left blank.
 - **Mouth gain** is a per-model fader — VRM `aa` shapes differ a lot in how far
   they open.
 - The call itself (mic, errors, text-only fallback) behaves exactly as on the
@@ -402,6 +447,7 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/agentcall.js   the call lifecycle both call pages share
   js/livecall.js    the Live Call page (binds agentcall to the live* ids)
   js/vrmcall.js     the VRM Call page: a three.js/three-vrm avatar whose mouth the call drives
+  vrm/              the bundled default avatar + idle clip (6.9 MB, served by the studio)
 tools/visemes.py    the Fish-anchored viseme baker (openfacefx + allosaurus)
 tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
 tools/bake_debug.py run the baker directly and print the real traceback
@@ -432,7 +478,8 @@ NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 33/33, no credit ne
 NODE_PATH=.../node_modules node tools/probe_duo.cjs        # two-hander + min-hold, no credit needed
 NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # needs real API credit
 NODE_PATH=.../node_modules node tools/probe_call_failures.cjs   # call errors, no credit
-NODE_PATH=.../node_modules node tools/probe_vrm.cjs avatar.vrm   # the VRM avatar, no credit
+NODE_PATH=.../node_modules node tools/probe_vrm.cjs             # the bundled avatar + idle clip, no credit
+NODE_PATH=.../node_modules node tools/probe_vrm.cjs avatar.vrm  # also: my own model over the default
 python tools/compare_bakers.py                                    # viseme correctness, no credit
 python tools/compare_bakers.py --endpoint http://127.0.0.1:8756   # + the shipped HTTP path
 ```
@@ -497,12 +544,21 @@ output level. It is what distinguishes "the call is broken" from "the agent's
 voice is broken" — see the Live Call section. It hangs up through the UI and
 releases its session.
 
-`probe_vrm.cjs` is the avatar's harness. It opens the VRM Call page, loads a
-`.vrm` through the **real file picker**, asserts the metadata parsed and that the
-render loop is drawing (`triangles > 0`), drives a level down the same wire the
-call's `onLevel` writes to and asserts it reaches the VRM `aa` expression and
-closes again in silence, waits for an auto-blink, and then switches to the Live
-Call page to prove it is unharmed. No API key and no credit: a call cannot be
+`probe_vrm.cjs` is the avatar's harness, and its baseline takes no arguments — a
+fresh browser profile has an empty IndexedDB, so it is checking exactly what a
+first visit sees. It asserts the bundled avatar loads with no file picker, that
+the idle clip is bound *and advancing* (a bound mixer whose clock is stopped would
+otherwise pass) and that it poses the body, that the clip's absolute hip offset
+was removed, that the gaze still converges on the camera while the clip plays
+(read by orbiting with a real drag, since the look-at target is parented to it),
+that no track binds this clip's head, and that **✕ Remove** restores the bundled
+avatar. Pass a `.vrm` and it additionally loads it through the **real file
+picker**, waits for the *uploaded* model by name rather than `model.loaded` (the
+default is already loaded, so that alone would pass too early), and checks the
+clip is rebuilt for it — then asserts the metadata parsed, the render loop is
+drawing (`triangles > 0`), a level down the same wire the call's `onLevel` writes
+reaches the VRM `aa` expression and closes again in silence, an auto-blink fires,
+and the Live Call page is unharmed. No API key and no credit: a call cannot be
 started headlessly without a microphone and an agent, so the level is injected
 through `window.__vrmcall.feed()` — everything downstream of that point is the
 shipped path. On a machine without a GPU (a VM or CI box), pass software WebGL:

@@ -116,22 +116,38 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   const featBlocks = await page.$$eval('#exList .card', e => e.length);
   const exCards = await page.$$eval('#exList .example-card', e => e.length);
   const exNav = await page.$$eval('#exNav .ex-nav-item', e => e.length);
+  // The tag reference is 7 grammar rows plus a hint div, with the tag-library
+  // picker button above them — count the button too, it is a real way in.
   const exTags = await page.$$eval('#exTags > div', e => e.length);
-  check('examples: all 12 feature blocks', featBlocks === 12, featBlocks + ' blocks');
+  const exPicker = await page.$$eval('#exTags > button', e => e.length);
+  // 12 hand-written feature blocks plus the tag library that is rendered out of
+  // web/js/tags.js, which is a block but not a feature with its own items.
+  check('examples: 12 feature blocks + the tag library', featBlocks === 13, featBlocks + ' blocks');
   check('examples: example scripts rendered', exCards >= 39, exCards + ' examples');
-  check('examples: sidebar nav + tag reference', exNav === featBlocks && exTags === 7, `${exNav} nav, ${exTags} tags`);
+  check('examples: sidebar nav + tag reference + library button',
+    exNav === featBlocks && exTags === 8 && exPicker === 1,
+    `${exNav} nav, ${exTags} rows, ${exPicker} library button`);
 
   // Every shipped script must be tag-balanced — a stray </whisper> in a long
   // example is invisible in the UI but breaks the synthesis outright.
   const linted = await page.evaluate(async () => {
     const E = await import('/js/examples.js');
     const D3 = await import('/js/drama3.js');
+    const T = await import('/js/tags.js');
     const bad = [];
     let total = 0;
-    for (const f of E.FEATURES) for (const it of f.items) {
+    // A block may carry `items`, or be the tag library (`library: true`), which
+    // renders its examples from tags.js instead of restating them. Both are
+    // shipped scripts and both have to lint.
+    for (const f of E.FEATURES) for (const it of f.items || []) {
       total++;
       const issues = D3.lint(it.script);
       if (issues.length) bad.push(`block ${f.n}: ${issues.join('; ')}`);
+    }
+    for (const c of T.TAG_CATEGORIES) for (const t of c.tags) {
+      total++;
+      const issues = D3.lint(t.text);
+      if (issues.length) bad.push(`tag "${t.label}": ${issues.join('; ')}`);
     }
     for (const [name, s] of Object.entries(D3.SCENE_EXAMPLES)) {
       total++;

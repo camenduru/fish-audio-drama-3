@@ -18,20 +18,28 @@
 //     vrm.update(delta) every frame
 //
 // The idle motion is a real .vrma clip (`web/vrm/idle_loop.vrma`, bundled) played
-// on a THREE.AnimationMixer, so the body sways and the head turns as authored.
+// on a THREE.AnimationMixer, so the body sways as authored.
 //
-// That composes with the gaze because three-vrm's look-at appliers write the
-// *eyes*: VRMLookAtBoneApplier.applyYawPitch rotates leftEye/rightEye and derives
-// its angle from the head's actual world quaternion, so a head the clip is turning
-// still aims the eyes at the viewer. (These head and neck tracks were being
-// dropped here on the theory that they fought the gaze — measured against
-// three-vrm 3.5.5, that is not what the applier does.)
+// Two things measured against this asset and against three-vrm, because both
+// obvious assumptions turn out to be wrong:
 //
-// What the clip does need is one correction: its hips translation is absolute, in
-// the source rig's frame, so playing it as-is slides the body off the origin the
-// camera was framed on — the "animation origin is offset" that ChatVRM works
-// around by re-framing the camera after play. Shifting the track onto this model's
-// rest hips instead keeps the sway and drops the offset.
+//   • The clip and the gaze do not compete. `VRMLookAtBoneApplier.applyYawPitch`
+//     rotates leftEye/rightEye and nothing else — true in 1.0.9 (what ChatVRM
+//     pins) and in 3.5.5 (ours). Dropping the clip's head and neck tracks to
+//     "protect" the gaze, as this file first did, solved a problem that does not
+//     exist and threw away real neck motion.
+//   • This clip cannot turn the head anyway. Its `head` channel targets a VRoid
+//     node that is not in the file's own humanoid map, and a VRMA only carries
+//     humanoid bones — so the loader correctly binds nothing for the head. 22 of
+//     the 28 channels survive as tracks (neck, spine, chest, arms, legs, hips);
+//     the other 6 target nodes the spec has no way to reach.
+//
+// What the clip does need is one correction: the loader scales its hips
+// translation to this model's hip height but leaves it absolute, so playing it
+// as-is slides the body ~15 cm sideways off the origin the camera was framed on —
+// the "animation origin is offset" ChatVRM works around by re-framing the camera
+// after play. Shifting the track onto this model's rest hips keeps the sway
+// (~2.7 cm) and drops the offset.
 //
 // If the clip is missing the rig falls back to the procedural chest sway it used
 // before, so the page never sits stone still. The bundled avatar
@@ -354,6 +362,13 @@ function applyIdleClip() {
     duration: +clip.duration.toFixed(3),
     tracks: clip.tracks.length,
     hipsOffset,
+    // Names travel with the snapshot so a harness can check which bones the clip
+    // can actually reach. Track names are the *normalized* node names, which for a
+    // VRoid-modeled VRM are things like `Normalized_J_Bip_C_Neck` — nothing a
+    // caller could guess.
+    trackNames: clip.tracks.map(t => t.name),
+    boneNames: Object.fromEntries(['hips', 'chest', 'head', 'neck', 'leftEye']
+      .map(b => [b, vrm.humanoid?.getNormalizedBoneNode?.(b)?.name ?? null])),
   };
   idleError = null;
 }
