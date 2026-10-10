@@ -304,14 +304,26 @@ async function loadInfo() {
     return;
   }
   const i = state.info;
-  state.avatars = i.avatars?.length ? i.avatars : [{
+  // Keep which avatars the server actually found separate from the fallback:
+  // the fallback below is never empty, which is what used to make the "not
+  // found" branch below unreachable.
+  const found = i.avatars?.length ? i.avatars : [];
+  state.avatars = found.length ? found : [{
     id: 'default', npc: '33', name: '33_default',
     face: i.face, sheet_url: i.sheet_url, portrait_url: i.portrait_url,
   }];
-  if (!i.avatar_dir_exists && !state.avatars.length) {
+  if (!i.avatar_dir_exists && !found.length) {
+    // The art is read from the game folder on whichever machine runs the
+    // server. A deploy has no such folder, so name the cause instead of
+    // pointing at a path the reader cannot open.
     $('#lsStages').replaceChildren(el('div.empty', {}, [
       el('div.big', {}, '🎭'),
-      el('div', {}, 'Avatar art not found at ' + i.avatar_dir),
+      el('div', {}, i.hosted
+        ? 'No game folder here, so there is no avatar art to preview.'
+        : 'Avatar art not found at ' + i.avatar_dir),
+      el('div.hint', {}, i.hosted
+        ? 'Baking still works — the exported .wav + .visemes.json pair is what the game loads.'
+        : 'Set ROGUELIKE_ROOT (or ROGUELIKE_DIALOGUE_DIR) to your game folder and reload.'),
     ]));
     return;
   }
@@ -822,6 +834,18 @@ async function bakeInto(take) {
   } catch (e) {
     throw new Error(`could not decode the take's audio (${take.blob.type || 'unknown type'}) — ${e.message}`);
   }
+  // A hosted deploy caps the request body (Vercel: 4.5 MB) and rejects it with
+  // a bare 413 before the baker runs. Check first so the message names the
+  // cause and the fix.
+  const limit = state.info?.max_upload_bytes || 0;
+  if (limit && bytes.length > limit) {
+    const mb = n => (n / 1048576).toFixed(1);
+    throw new Error(
+      `this line's WAV is ${mb(bytes.length)} MB, past the ${mb(limit)} MB this ` +
+      `host accepts in one request — bake it locally, or shorten the line`
+    );
+  }
+
   const fd = new FormData();
   fd.append('wav', new Blob([bytes], { type: 'audio/wav' }), 'line.wav');
   fd.append('text', take.text);

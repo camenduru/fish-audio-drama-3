@@ -1,0 +1,22 @@
+# What must not be uploaded when this project is deployed.
+#
+# .env holds FISH_API_KEY. On Vercel the key belongs in Project → Settings →
+# Environment Variables; a local .env must never be part of the upload.
+.env
+.env.local
+.env.development
+.env.production
+
+# Local machine state and tooling — none of it is needed to serve the app.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+data/
+node_modules/
+.git/
+.gitignore
+
+# Probe harnesses and their fixtures are development-only. tools/visemes.py is
+# NOT excluded: the viseme baker runs from the function bundle.
+tools/fixtures/

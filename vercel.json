@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "server/main.py": {
+      "maxDuration": 300,
+      "includeFiles": "{web/**,tools/visemes.py}"
+    }
+  }
+}

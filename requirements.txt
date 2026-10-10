@@ -1,0 +1,17 @@
+# Runtime dependencies, mirroring [project].dependencies in pyproject.toml.
+#
+# pyproject.toml is the fuller declaration (it also carries the Vercel entrypoint
+# and the setuptools metadata); this file exists because some builders only look
+# for requirements.txt. Keep the two in step — the lists are identical today.
+fastapi>=0.117.1
+uvicorn[standard]>=0.30
+httpx>=0.27
+python-multipart>=0.0.9
+msgpack>=1.0
+
+# The viseme baker (tools/visemes.py) needs numpy + openfacefx. Its wheel is pure
+# Python and pulls in numpy only. Allosaurus is deliberately NOT listed: it
+# requires torch, which is far past a Python bundle limit, and the baker falls
+# back to the Fish word-timing aligner when it is unavailable.
+numpy>=1.26
+openfacefx>=0.24

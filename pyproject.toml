@@ -1,0 +1,41 @@
+[project]
+name = "fish-audio-drama3-studio"
+version = "1.0.0"
+description = "Fish Audio Drama 3 Studio — a server-side proxy and web UI for the Fish Audio API"
+requires-python = ">=3.12"
+
+# Runtime dependencies. These are what Vercel installs when it builds this as a
+# Python Function; the local launcher (run.sh) installs the same set into .venv.
+#
+# Deliberately absent: torch. tools/visemes.py uses Allosaurus when it can find
+# it and silently falls back to the Fish word-timing aligner when it cannot, so
+# leaving it out costs a little phonetic accuracy and saves a ~800 MB install —
+# which would not fit Vercel's 500 MB Python bundle anyway.
+dependencies = [
+    "fastapi>=0.117.1",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "python-multipart>=0.0.9",
+    "msgpack>=1.0",
+    # The viseme baker (tools/visemes.py) runs on numpy + openfacefx only. Its
+    # wheel is pure Python and pulls in numpy and nothing else.
+    "numpy>=1.26",
+    "openfacefx>=0.24",
+]
+
+# Vercel: load `app` from server/main.py. The entrypoint filenames Vercel
+# auto-detects (app.py, main.py, server.py, ...) don't cover a package module,
+# so the path has to be declared explicitly.
+[tool.vercel]
+entrypoint = "server.main:app"
+
+# Declared so a builder that decides to install this project as a package gets a
+# predictable result rather than failing. `packages` is explicit on purpose:
+# with several top-level directories (web/, tools/, server/) setuptools'
+# flat-layout auto-discovery raises "multiple top-level packages discovered".
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["server"]

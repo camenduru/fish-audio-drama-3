@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -34,11 +36,48 @@ from fastapi.staticfiles import StaticFiles
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
 ENV_FILE = ROOT / ".env"
-DATA_DIR = ROOT / "data"
-DATA_DIR.mkdir(exist_ok=True)
+
+# True when running inside a serverless function (Vercel sets VERCEL=1).
+# Several things below behave differently because a function has a read-only
+# filesystem, a duration ceiling, and no access to this machine's folders.
+IS_SERVERLESS = bool(os.environ.get("VERCEL"))
+
+# Vercel rejects a request body over 4.5 MB before the app ever sees it, so the
+# UI is told the working limit and can explain itself instead of surfacing a
+# bare 413. Locally there is no such cap (0 = unlimited).
+MAX_UPLOAD_BYTES = int(os.environ.get(
+    "MAX_UPLOAD_BYTES", "4400000" if IS_SERVERLESS else "0"))
 
 API_BASE = os.environ.get("FISH_API_BASE", "https://api.fish.audio")
 APP_VERSION = "1.0.0"
+
+
+def _writable_dir(candidates: list[Path]) -> tuple[Path, bool]:
+    """The first candidate we can actually write to, and whether it is the
+    project's own data/ rather than a rented temporary.
+
+    A serverless bundle is read-only: only /tmp is writable, and it is thrown
+    away with the instance. So the studio has to *find* somewhere to keep takes
+    instead of assuming it may create data/ beside its own code — that mkdir is
+    exactly what would fail a cold start.
+    """
+    for path in candidates:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / ".writable"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+            return path, path == candidates[0]
+        except OSError:
+            continue
+    return candidates[-1], False
+
+
+DATA_DIR, DATA_DIR_PERSISTENT = _writable_dir([
+    Path(os.environ["STUDIO_DATA_DIR"]) if os.environ.get("STUDIO_DATA_DIR")
+    else ROOT / "data",
+    Path(tempfile.gettempdir()) / "fish-studio" / "data",
+])
 
 # The model every generation path uses unless the caller says otherwise.
 # NOTE: Fish silently falls back to `s2.1-pro` for an omitted *or unrecognized*
@@ -84,20 +123,39 @@ def get_api_key() -> str:
     return os.environ.get("FISH_API_KEY") or _read_env_file().get("FISH_API_KEY", "")
 
 
-def set_api_key(key: str) -> None:
+def key_source() -> str:
+    """Where the key came from: env, file, or nowhere."""
+    if os.environ.get("FISH_API_KEY"):
+        return "env"
+    if _read_env_file().get("FISH_API_KEY"):
+        return "file"
+    return "none"
+
+
+def set_api_key(key: str) -> bool:
+    """Use the key now, and save it to .env when there is a writable one.
+
+    Returns whether it reached disk. A deployed function has no writable
+    project directory, so there the key can only come from the environment —
+    saying so beats a traceback in the Settings panel.
+    """
+    os.environ["FISH_API_KEY"] = key
     lines = []
     found = False
-    if ENV_FILE.exists():
-        for raw in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            if raw.strip().startswith("FISH_API_KEY"):
-                lines.append(f"FISH_API_KEY={key}")
-                found = True
-            else:
-                lines.append(raw)
-    if not found:
-        lines.append(f"FISH_API_KEY={key}")
-    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    os.environ["FISH_API_KEY"] = key
+    try:
+        if ENV_FILE.exists():
+            for raw in ENV_FILE.read_text(encoding="utf-8").splitlines():
+                if raw.strip().startswith("FISH_API_KEY"):
+                    lines.append(f"FISH_API_KEY={key}")
+                    found = True
+                else:
+                    lines.append(raw)
+        if not found:
+            lines.append(f"FISH_API_KEY={key}")
+        ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
 
 
 def _auth_headers() -> dict[str, str]:
@@ -125,13 +183,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Persistent client. Long timeout: long-form TTS can take a while.
-_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+# Long timeout: long-form TTS can take a while.
+_CLIENT_TIMEOUT = httpx.Timeout(float(os.environ.get("FISH_TIMEOUT", "600")), connect=30.0)
+
+# One client per event loop. A function instance is reused across invocations,
+# and an AsyncClient's connection pool belongs to the loop it first ran on, so a
+# single module-level client would hand a later invocation a pool owned by a
+# loop that has since closed. The shim keeps every call site unchanged.
+_clients: dict[int, httpx.AsyncClient] = {}
+
+
+class _LoopBoundClient:
+    """Delegates attribute access to a client belonging to the running loop."""
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            loop_id = id(asyncio.get_running_loop())
+        except RuntimeError:
+            loop_id = 0
+        client = _clients.get(loop_id)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=_CLIENT_TIMEOUT)
+            _clients[loop_id] = client
+        return getattr(client, name)
+
+
+_client = _LoopBoundClient()
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    await _client.aclose()
+    for client in list(_clients.values()):
+        await client.aclose()
+    _clients.clear()
 
 
 @app.exception_handler(HTTPException_ish)
@@ -142,6 +226,37 @@ async def _ish_handler(_req: Request, exc: HTTPException_ish) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 # Status / settings
 # --------------------------------------------------------------------------- #
+def _has_module(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def baker_status() -> dict[str, Any]:
+    """Whether a viseme bake can run here, and on what.
+
+    Allosaurus is optional: it needs torch, which is far past a Python bundle
+    limit, so a deployment bakes with the Fish word-timing aligner instead. The
+    baker script downgrades by itself when the import is missing.
+
+    Only the interpreter running this process can be introspected here. When the
+    baker is a *different* interpreter those two probes are null rather than
+    false — locally the system Python has openfacefx while the studio venv does
+    not, so reporting false would be plain wrong.
+    """
+    in_process = os.path.realpath(VISEME_PYTHON) == os.path.realpath(sys.executable)
+    return {
+        "python": VISEME_PYTHON,
+        "python_exists": Path(VISEME_PYTHON).exists(),
+        "script_exists": VISEME_SCRIPT.exists(),
+        "allosaurus": _has_module("allosaurus") if in_process else None,
+        "openfacefx": _has_module("openfacefx") if in_process else None,
+        "probe": "in-process" if in_process else "external",
+        "timeout": VISEME_TIMEOUT,
+    }
+
+
 @app.get("/api/status")
 async def status() -> dict[str, Any]:
     key = get_api_key()
@@ -151,19 +266,37 @@ async def status() -> dict[str, Any]:
         "api_base": API_BASE,
         "key_configured": bool(key),
         "key_hint": (key[:10] + "..." + key[-4:]) if len(key) > 16 else ("set" if key else ""),
+        # Where the key lives, so Setup can say "set FISH_API_KEY in your host's
+        # environment" instead of offering a save that silently cannot work.
+        "key_source": key_source(),
+        "hosted": IS_SERVERLESS,
+        "data_dir": str(DATA_DIR),
+        "data_dir_persistent": DATA_DIR_PERSISTENT,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
+        "baker": baker_status(),
     }
 
 
 @app.get("/api/settings")
 async def get_settings() -> dict[str, Any]:
-    return {"api_base": API_BASE, "key_configured": bool(get_api_key())}
+    return {
+        "api_base": API_BASE,
+        "key_configured": bool(get_api_key()),
+        "key_source": key_source(),
+    }
 
 
 @app.post("/api/settings")
 async def post_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    persisted = None
     if payload.get("api_key"):
-        set_api_key(str(payload["api_key"]).strip())
-    return {"ok": True, "key_configured": bool(get_api_key())}
+        persisted = set_api_key(str(payload["api_key"]).strip())
+    return {
+        "ok": True,
+        "key_configured": bool(get_api_key()),
+        "key_persisted": persisted,
+        "key_source": key_source(),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -397,9 +530,27 @@ DIALOGUE_ROOT = Path(os.environ.get(
     "ROGUELIKE_DIALOGUE_DIR", str(ROGUELIKE_ROOT / "assets" / "dialogue")))
 AVATAR_DIR = Path(os.environ.get(
     "ROGUELIKE_AVATAR_DIR", str(DIALOGUE_ROOT / "33")))
-VISEME_PYTHON = os.environ.get(
-    "VISEME_PYTHON", r"C:\Users\PC\AppData\Local\Programs\Python\Python313\python.exe")
+# The baker shells out to an interpreter that can import numpy + openfacefx.
+# Locally that is a system Python (the studio venv carries neither). A deployed
+# function has no such path, so it falls back to the interpreter this process is
+# already running — the one the declared dependencies were installed into.
+_BAKER_PYTHON_LOCAL = r"C:\Users\PC\AppData\Local\Programs\Python\Python313\python.exe"
+
+
+def _baker_python() -> str:
+    configured = os.environ.get("VISEME_PYTHON")
+    if configured:
+        return configured
+    if Path(_BAKER_PYTHON_LOCAL).exists():
+        return _BAKER_PYTHON_LOCAL
+    return sys.executable
+
+
+VISEME_PYTHON = _baker_python()
 VISEME_SCRIPT = ROOT / "tools" / "visemes.py"
+# Keep a bake inside the platform's function ceiling (a Hobby function is capped
+# at 300 s): a clean error beats the platform killing the request with a 504.
+VISEME_TIMEOUT = int(os.environ.get("VISEME_TIMEOUT", "240"))
 
 
 def discover_avatars() -> list[dict[str, Any]]:
@@ -491,11 +642,9 @@ async def lipsync_info() -> JSONResponse:
         # render hold (a shape cannot change until it has been on screen that
         # long). The preview needs it or it flickers on cues the game would hold.
         "voice": voice,
-        "baker": {
-            "python": VISEME_PYTHON,
-            "python_exists": Path(VISEME_PYTHON).exists(),
-            "script_exists": VISEME_SCRIPT.exists(),
-        },
+        "baker": baker_status(),
+        "hosted": IS_SERVERLESS,
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
     })
 
 
@@ -561,7 +710,7 @@ async def bake_visemes(
             if lag:
                 cmd += ["--lag", str(lag)]
 
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=VISEME_TIMEOUT)
             if proc.returncode != 0 or not out_path.exists():
                 raise RuntimeError((proc.stderr or proc.stdout or "bake failed").strip())
 
@@ -606,8 +755,18 @@ async def store_get(name: str) -> JSONResponse:
 
 @app.put("/api/store/{name}")
 async def store_put(name: str, payload: dict[str, Any]) -> JSONResponse:
-    _store_path(name).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    return JSONResponse({"ok": True})
+    try:
+        _store_path(name).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        # A deployed function has nowhere writable that outlives the request.
+        # The take still works; it just will not be there next time.
+        return JSONResponse({
+            "ok": False,
+            "persisted": False,
+            "message": f"no writable storage here ({exc.__class__.__name__}); "
+                       "takes are kept in memory for this session only",
+        })
+    return JSONResponse({"ok": True, "persisted": True})
 
 
 # --------------------------------------------------------------------------- #

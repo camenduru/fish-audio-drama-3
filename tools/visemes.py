@@ -30,8 +30,11 @@ exact boundaries and never guess:
 The energy silence pass still runs afterwards, because it is the only thing that
 catches silence INSIDE a word's span and the tail after the last word.
 
-REQUIRES the system Python (it has openfacefx + numpy); the fish.audio venv does
-not, and installing torch there would be absurd. Pass it with --python.
+REQUIRES an interpreter with numpy + openfacefx, which is what --python selects.
+Locally that is a system Python rather than the studio venv; on a deployment the
+server's own interpreter is the baker, with those two installed from
+pyproject.toml. Allosaurus stays optional either way - it drags in torch - and
+without it the alignment comes from the Fish word timings.
 
 Usage:
     python tools/visemes.py --wav line.wav --text "[calm] Hello there." \\

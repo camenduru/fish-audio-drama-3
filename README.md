@@ -504,10 +504,63 @@ the enum is `s1 | s2-pro | s2.1-pro | s2.1-pro-free | drama-3-preview`.
 > (with `tools/echo_upstream.py`) is the wire-level check for this: it points the
 > app at a recording stub and asserts the `model` header on every path.
 
+## Deploying to Vercel
+
+Three files plus an ignore list are what Vercel needs, and they are all in the
+repo — `vercel` (or importing the Git repo) deploys the whole app as one Python
+Function:
+
+| File | Why |
+| --- | --- |
+| `pyproject.toml` | dependencies, plus `[tool.vercel] entrypoint = "server.main:app"` |
+| `requirements.txt` | the same dependency list, for a builder that only reads this one |
+| `vercel.json` | `maxDuration: 300`, and `includeFiles` so `web/**` and `tools/visemes.py` ship |
+| `.vercelignore` | keeps `.env` (your key) and local state out of the upload |
+
+Set the key as an environment variable — Project → Settings → Environment
+Variables, or `vercel env add FISH_API_KEY`. The server prefers `FISH_API_KEY`
+from the environment over `.env`, which matters because a deploy has no writable
+`.env` to fall back to.
+
+### What changes on a serverless host
+
+The backend was written for a local machine: a writable project directory, a
+system Python, and the game folder next door. It detects `VERCEL` and adapts.
+
+| Local assumption | What a deploy does instead |
+| --- | --- |
+| `data/` is writable | Falls back to a temp directory and reports `data_dir_persistent: false`; takes and presets live as long as the instance. |
+| `.env` is writable | Nothing is written. Setup says the key has to come from the host's environment instead of offering a save that cannot stick. |
+| The baker runs on a system Python | Falls back to the function's own interpreter, which has `numpy` + `openfacefx` from the manifest. |
+| Allosaurus is available | It isn't: it requires torch, far past the 500 MB Python bundle limit. The baker uses the Fish word-timing aligner instead (`aligner: "anchors"`) — the word boundaries are still Fish's own, only the phone-level shapes are coarser. |
+| The game folder exists | It doesn't, so the portrait preview says so; generating and exporting the `.wav` + `.visemes.json` pair still works. |
+| No request size cap | Vercel rejects a body over 4.5 MB, so the Lip Sync page measures the WAV against the advertised limit and explains, rather than surfacing a bare `413`. |
+
+`/api/status` reports all of it — `hosted`, `data_dir_persistent`,
+`key_source`, `max_upload_bytes`, `baker` — so the UI can state what a deploy
+cannot do instead of failing obscurely.
+
+### Limits that cannot be coded around
+
+- **Duration.** A Hobby function is capped at 300 s *and* that is its maximum
+  (Pro allows up to 800). The proxy's own HTTP timeout is 600 s, so a very long
+  generation can still outlive the platform. `vercel.json` sets 300.
+- **Body size.** 4.5 MB per request or response. A 60-minute `transcribe-1-pro`
+  recording is 100+ MB and cannot be uploaded through a function at all.
+- **No persistent disk.** Takes, presets and uploaded reference audio are
+  per-instance and disappear with it.
+
+Local development is unchanged: without `VERCEL` the studio keeps `data/`, the
+system Python and the game folder exactly as before.
+
 ## Layout
 
 ```
 server/main.py      FastAPI: auth proxy + static host
+pyproject.toml      dependencies + the Vercel entrypoint (server.main:app)
+requirements.txt    the same dependencies, for builders that read only this one
+vercel.json         Vercel: maxDuration + includeFiles for web/ and the baker
+.vercelignore       keeps .env and local state out of a Vercel upload
 web/                the studio (vanilla JS ES modules, no build step)
   js/drama3.js      the Drama 3 grammar: highlight, auto-tag, scene parsing
   js/studio.js      editor, generation, player, takes, inpainting
@@ -524,7 +577,7 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/vrmcall.js     the VRM Call page: a three.js/three-vrm avatar whose mouth the call drives
   js/emote.js       ChatVRM's expression side — lip sync, emotions, blinking, look-at
   vrm/              the bundled default avatar + idle clip (6.9 MB, served by the studio)
-tools/visemes.py    the Fish-anchored viseme baker (openfacefx + allosaurus)
+tools/visemes.py    the Fish-anchored viseme baker (openfacefx, optional allosaurus)
 tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
 tools/bake_debug.py run the baker directly and print the real traceback
 tools/compare_bakers.py  studio-only viseme checks (well-formed, loud-audio, phones, guard)

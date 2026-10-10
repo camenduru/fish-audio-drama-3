@@ -42,7 +42,16 @@ async function refreshStatus() {
     const badge = $('#keyBadge');
     badge.textContent = s.key_configured ? 'key ✓' : 'key missing';
     badge.className = 'badge ' + (s.key_configured ? 'green' : 'red');
-    $('#setKeyStatus').textContent = s.key_configured ? `Key configured (${s.key_hint}).` : 'No key configured.';
+    // A deployed instance has nowhere to write .env, so the key has to come
+    // from the host's environment — say which, rather than offering a save that
+    // cannot stick.
+    $('#setKeyStatus').textContent = s.key_configured
+      ? (s.key_source === 'env'
+          ? `Key configured from the environment (${s.key_hint}).`
+          : `Key configured (${s.key_hint}).`)
+      : (s.hosted
+          ? 'No key: set FISH_API_KEY in this host\u2019s environment variables.'
+          : 'No key configured.');
   } catch (e) {
     $('#keyBadge').textContent = 'offline';
     $('#keyBadge').className = 'badge red';
@@ -99,7 +108,13 @@ function initSettings() {
   $('#setKeySave').addEventListener('click', async () => {
     const key = $('#setKey').value.trim();
     if (!key) { toast('Paste a key first.', 'err'); return; }
-    try { await apiFetch('/api/settings', { method: 'POST', body: { api_key: key } }); toast('Key saved.', 'ok'); $('#setKey').value = ''; refreshStatus(); }
+    try {
+      const r = await apiFetch('/api/settings', { method: 'POST', body: { api_key: key } });
+      toast(r.key_persisted === false
+        ? 'Key accepted for this instance, but this host has no writable disk — set FISH_API_KEY in its environment to make it stick.'
+        : 'Key saved.', r.key_persisted === false ? 'err' : 'ok');
+      $('#setKey').value = ''; refreshStatus();
+    }
     catch (e) { toast(e.message, 'err'); }
   });
   $('#walletLoad').addEventListener('click', loadWallet);
