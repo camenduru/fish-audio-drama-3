@@ -16,8 +16,9 @@ sys.modules["visemes"] = v
 spec.loader.exec_module(v)
 
 WAV = sys.argv[1] if len(sys.argv) > 1 else \
-    r"C:\Users\PC\Documents\content\wicked\RoguelikeGame\assets\audio\speech\en\33\33_33000.wav"
-TEXT = sys.argv[2] if len(sys.argv) > 2 else "The old lamp still flickers."
+    str(Path(__file__).with_name("fixtures") / "speech.wav")
+TEXT = sys.argv[2] if len(sys.argv) > 2 else \
+    "The old lamp still flickers. Nobody has lit it in years."
 
 class Args:
     aligner = "auto"

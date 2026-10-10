@@ -3,23 +3,22 @@
 """
 Bake a Rhubarb-format VISEME sidecar for a Fish Audio Drama 3 line.
 
-This is the bridge between the Fish Audio studio and Wicked Roguelike. The game
-loads a mouth-shape timeline from a sidecar next to the recording:
+This writes the mouth-shape timeline that plays next to a recording:
 
     assets/audio/speech/en/33/33_33000.wav
     assets/audio/speech/en/33/33_33000.visemes.json   <- what this writes
 
-Format (identical to the game's tools/gen_visemes.py and to Rhubarb Lip Sync):
+Format (the Rhubarb Lip Sync cue format):
 
     { "metadata": { "duration": 4.551 },
       "mouthCues": [ { "start": 0.0, "end": 0.16, "value": "B" }, ... ] }
 
 Values are the Hanna-Barbera shapes A-H plus X (idle/closed).
 
-WHY THIS IS BETTER THAN THE GAME'S OWN PIPELINE
------------------------------------------------
-`tools/gen_visemes.py` has to RECOVER word timing - Rhubarb, Whisper, Allosaurus
-or a wav2vec2 forced aligner. Fish already knows it: the streaming TTS endpoint
+WHY THIS DOES NOT RE-DERIVE THE TIMING
+--------------------------------------
+An ASR pipeline has to RECOVER word timing - Rhubarb, Whisper, Allosaurus or a
+wav2vec2 forced aligner. Fish already knows it: the streaming TTS endpoint
 returns per-word start/end alongside the audio. So we pin the aligner to Fish's
 exact boundaries and never guess:
 
@@ -52,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import unicodedata
 import wave
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +170,7 @@ def build_anchors(align_json: dict, out_path: str) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Silence pass (same algorithm as the game's tools/gen_visemes.py)
+# Silence pass
 # --------------------------------------------------------------------------- #
 def apply_silence_pass(cues: list, wav_path: str, min_silence: float) -> list:
     """Force the mouth CLOSED wherever the recording is actually silent.
@@ -179,10 +179,11 @@ def apply_silence_pass(cues: list, wav_path: str, min_silence: float) -> list:
     mouth shape across the gap, but the audio energy decides where the silence
     really is, and any cue overlapping it is split and set to X.
 
-    The split / sort / merge / round / drop-tiny tail is byte-for-byte the same
-    as the game's tools/gen_visemes.py::apply_silence_pass. Keep it that way:
-    tools/compare_bakers.py diffs the two bakers on the same WAV, and a sidecar
-    that differs from the game's own is a preview that lies about what ships.
+    The split / sort / merge / round / drop-tiny tail is deliberately left
+    exactly as it was ported. The shape of this pass decides where every X lands
+    in every sidecar, so changing it silently re-times mouth tracks that have
+    already shipped. tools/compare_bakers.py measures the outcome instead: it
+    checks the mouth is not closed over audio that is actually loud.
     """
     try:
         import numpy as np
@@ -372,13 +373,112 @@ def have_allosaurus() -> bool:
         return False
 
 
+# --------------------------------------------------------------------------- #
+# Allosaurus IPA -> ARPAbet
+# --------------------------------------------------------------------------- #
+# OpenFaceFX's `--anchors-format phones --phones-alphabet ipa` only knows the 39
+# canonical spellings in its IPA_ALIASES bijection. Anything else passes through
+# unconverted and is routed to `sil` at the viseme stage, i.e. the mouth CLOSES.
+# Allosaurus speaks the 230-symbol universal inventory, so its ordinary output
+# (ə o ʀ ɹ̩ b̥ ɒ ɾ ɾʲ ...) missed that table and every one of those phones was
+# baked as a shut mouth — on screen: "the sync is wrong and X is in the wrong
+# place". Measured on a real line, "The old lamp..." lost the whole first 0.58 s
+# of speech to X before this table existed.
+#
+# So we translate to ARPAbet ourselves and hand OpenFaceFX
+# `--phones-alphabet arpabet`, where from_alphabet is the identity and all 39
+# symbols are guaranteed to have a viseme.
+#
+# Two steps: strip the diacritics/stress marks (b̥ -> b, ɾʲ -> ɾ, ɹ̩ -> ɹ,
+# d͡ʒ -> dʒ, k̟ʲ -> k), then look the base symbol up.
+_IPA_STRIP = frozenset(
+    "ˈˌːˑʰʲʷˤˠ˥˦˧˨˩ˀ"     # stress, length, release, co-articulation
+    "͜͡"                     # affricate tie bars
+    "':"                     # ASCII stress / length marks
+)
+
+_IPA_TO_ARPABET = {
+    # ---- vowels ---------------------------------------------------------- #
+    "i": "IY", "ij": "IY", "ɨ": "IH", "ɪ": "IH", "I": "IH",
+    "e": "EH", "ɛ": "EH", "ø": "EH", "œ": "EH", "ɘ": "AH",
+    "ə": "AH", "ә": "AH", "ɐ": "AH",
+    "ʌ": "AH", "ä": "AH",
+    "a": "AE", "æ": "AE", "ḁ": "AE",
+    "ɑ": "AA", "ɒ": "AA",
+    "ɔ": "AO",
+    "o": "OW", "ɵ": "OW", "ɤ": "OW", "ɤɐ": "OW",
+    "u": "UW", "uw": "UW", "ʉ": "UW", "y": "UW", "ɯ": "UW",
+    "ʊ": "UH", "ʏ": "UH",
+    "ɜ": "ER", "ɝ": "ER", "ɚ": "ER",
+    # diphthongs, both the ɪ/ʊ- and the j/w-offglide spellings
+    "aɪ": "AY", "aj": "AY", "aʊ": "AW", "aw": "AW",
+    "eɪ": "EY", "ej": "EY", "oʊ": "OW", "ow": "OW", "əʊ": "OW",
+    "ɔɪ": "OY", "ɔj": "OY",
+    # ---- stops / affricates ---------------------------------------------- #
+    "p": "P", "pf": "P",
+    "b": "B", "ɓ": "B",
+    "t": "T", "ʈ": "T", "ʔ": "T",
+    "d": "D", "ɗ": "D", "ɖ": "D",
+    "k": "K", "c": "K", "q": "K", "ɟ": "K", "kx": "K", "kp": "K",
+    "g": "G", "ɡ": "G", "ɣ": "G",
+    "tʃ": "CH", "tɕ": "CH", "tʂ": "CH", "ʧ": "CH",
+    "dʒ": "JH", "dʑ": "JH", "ʤ": "JH",
+    # ---- fricatives ------------------------------------------------------ #
+    "f": "F", "ɸ": "F",
+    "v": "V", "ʋ": "V", "β": "V",
+    "θ": "TH", "ð": "DH",
+    "s": "S", "ts": "S", "ʂ": "S", "ɕ": "S",
+    "z": "Z", "dz": "Z", "ʐ": "Z", "ʑ": "Z",
+    "ʃ": "SH", "ʃɣ": "SH", "ç": "SH",
+    "ʒ": "ZH", "ʒɣ": "ZH",
+    "h": "HH", "ɦ": "HH", "x": "HH", "χ": "HH",
+    # ---- nasals / liquids / glides --------------------------------------- #
+    "m": "M", "ɱ": "M",
+    "n": "N",
+    "ŋ": "NG", "ŋm": "NG", "ɲ": "NG", "ɳ": "NG", "ɴ": "NG",
+    "l": "L", "ɫ": "L", "ʎ": "L", "ɬ": "L", "tɬ": "L",
+    "r": "R", "ɾ": "R", "ɹ": "R", "ɻ": "R", "ɽ": "R", "ʀ": "R",
+    "ʁ": "R", "ɰ": "R",
+    "j": "Y", "ʝ": "Y", "ɥ": "Y",
+    "w": "W", "ʍ": "W",
+}
+
+
+def normalise_phone(symbol: str) -> str | None:
+    """Allosaurus IPA token -> ARPAbet, or None if it cannot be placed.
+
+    None is a real answer: the caller keeps the original symbol, OpenFaceFX
+    routes it to silence, and the bake degrades to the old behaviour for that
+    one phone instead of failing.
+    """
+    base = "".join(ch for ch in symbol
+                   if ch not in _IPA_STRIP and not unicodedata.combining(ch))
+    if not base:
+        return None
+    if base in _IPA_TO_ARPABET:
+        return _IPA_TO_ARPABET[base]
+    # A palatalised consonant (bʲj -> bj, ɾʲ -> ɾj): the trailing j is a
+    # secondary articulation, not a phoneme of its own.
+    if len(base) > 1 and base.endswith("j") and base[:-1] in _IPA_TO_ARPABET:
+        return _IPA_TO_ARPABET[base[:-1]]
+    # Last resort: the longest known prefix (tʂʰ -> tʂ, ŋ̟ -> ŋ). A near
+    # neighbour is still a moving mouth, which beats a closed one.
+    for n in range(len(base) - 1, 0, -1):
+        if base[:n] in _IPA_TO_ARPABET:
+            return _IPA_TO_ARPABET[base[:n]]
+    return None
+
+
 def allosaurus_phone_file(wav_abs: str, out_path: str, silence_rms: float = 0.03) -> bool:
     """Phone-level timing from the universal recognizer, gated by audio energy.
 
-    Ported from the game's tools/gen_visemes.py. Transcript-free, so it never
-    disagrees with the script - it just says what the audio actually sounds
-    like. The energy gate is what turns the gaps between phones into real
-    silence instead of a closed-mouth flutter.
+    Transcript-free, so it never disagrees with the script - it just says what
+    the audio actually sounds like. The energy gate is what turns the gaps
+    between phones into real silence instead of a closed-mouth flutter.
+
+    Writes `start end ARPABET` rows (normalise_phone translates Allosaurus's
+    IPA), which OpenFaceFX reads with --anchors-format phones
+    --phones-alphabet arpabet.
     """
     global _ALLO_MODEL
     import numpy as np
@@ -437,6 +537,7 @@ def allosaurus_phone_file(wav_abs: str, out_path: str, silence_rms: float = 0.03
 
     onsets = [r[0] for r in rows]
     lines = []
+    unmapped = []
     for s, e in merged:
         idx = [k for k, o in enumerate(rows) if s <= o[0] < e]
         if not idx:
@@ -448,9 +549,22 @@ def allosaurus_phone_file(wav_abs: str, out_path: str, silence_rms: float = 0.03
             t = s if n_i == 0 else max(s, onsets[k])
             end = min(e, onsets[idx[n_i + 1]]) if n_i + 1 < len(idx) else e
             if end > t:
-                lines.append(f"{t:.3f} {end:.3f} {rows[k][2]}")
+                # ARPAbet, not raw IPA: see normalise_phone(). An IPA symbol
+                # OpenFaceFX does not know is baked as a CLOSED mouth, which is
+                # exactly the "X in the wrong place" bug this avoids.
+                sym = normalise_phone(rows[k][2])
+                if sym is None:
+                    unmapped.append(rows[k][2])
+                    sym = rows[k][2]
+                lines.append(f"{t:.3f} {end:.3f} {sym}")
     if not lines:
         return False
+    if unmapped:
+        # Loud, not silent: an unplaceable phone closes the mouth, so it must be
+        # visible rather than quietly degrading the bake.
+        uniq = " ".join(sorted(set(unmapped)))
+        print(f"  allosaurus: {len(unmapped)} phone(s) unmapped -> closed mouth: {uniq}",
+              file=sys.stderr)
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     return True
@@ -468,7 +582,7 @@ def run_openfacefx(py: str, wav: str, text: str, anchors: str | None,
     cmd += ["--wav", wav, "-o", out, "--cue-format", "json-cues"]
     if anchors and anchors_mode == "phones":
         cmd += ["--anchors", anchors, "--anchors-format", "phones",
-                "--phones-alphabet", "ipa", "--phones-timing", "start_end"]
+                "--phones-alphabet", "arpabet", "--phones-timing", "start_end"]
     elif anchors:
         cmd += ["--anchors", anchors, "--anchors-format", "whisper"]
     if style:
@@ -578,10 +692,10 @@ def main() -> int:
     ap.add_argument("--lag", type=int, default=0)
     ap.add_argument("--no-silence-pass", action="store_true")
     ap.add_argument("--speech-guard", action="store_true",
-                    help="OPT-IN and DIVERGES from the game's baker: re-open the mouth "
-                         "inside a word Fish reports as spoken, to recover soft onsets "
-                         "the energy gate reads as silence. Off by default so the sidecar "
-                         "is identical to tools/gen_visemes.py output.")
+                    help="OPT-IN: re-open the mouth inside a word Fish reports as "
+                         "spoken, to recover soft onsets the energy gate reads as "
+                         "silence. Off by default — it changes the cue timeline, so "
+                         "leave it off unless you are correcting a specific line.")
     ap.add_argument("--silence-min", type=float, default=0.16)
     ap.add_argument("--python", default=sys.executable,
                     help="interpreter that has openfacefx (the system Python)")

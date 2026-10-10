@@ -1,11 +1,12 @@
 // scenes.js — multi-speaker dialogue: speakers + a "Name: line" script → one scene
 
-import { $, el, toast, modal, close, apiFetch, downloadBlob } from './api.js';
+import { $, el, toast, modal, close, apiFetch, downloadBlob, fish } from './api.js';
 import * as D3 from './drama3.js';
 import * as A from './audio.js';
 import { openVoicePicker } from './voicepicker.js';
 
 const scene = { speakers: [], lastBlob: null };
+let assigning = false;   // guards the voice-library fetch against double-clicks
 
 function speakerCard(sp, i) {
   const voiceInput = el('input.input.mono', {
@@ -48,10 +49,72 @@ function speakerCard(sp, i) {
 
 function render() {
   const box = $('#sceneSpeakers');
+  const missing = scene.speakers.some(s => !s.voiceId);
   const head = el('div.flex.aic.gap.mb', {}, [
     el('div.hint.grow', {}, `${scene.speakers.length} speaker(s). Write the scene below as “Name: line”.`),
+    missing ? el('button.btn.sm.ghost', { onclick: assignVoices }, '🎲 Assign voices') : null,
   ]);
   box.replaceChildren(head, ...scene.speakers.map(speakerCard));
+}
+
+/** The “Assign voices” button: fill the empty cards, then show what it picked. */
+async function assignVoices() {
+  if (assigning) return;
+  if (!scene.speakers.some(s => !s.voiceId)) { toast('Every speaker already has a voice.', ''); return; }
+  assigning = true;
+  try {
+    const n = await autoAssignVoices(scene.speakers);
+    render();
+    toast(n ? `Picked ${n} voice(s).` : 'Could not reach the voice library.', n ? 'ok' : 'err');
+  } finally { assigning = false; }
+}
+
+/**
+ * Give every speaker that has no voice a distinct one from the library.
+ *
+ * A scene cannot be sent with a hole in its cast: the `<|speaker:n|>` markers
+ * index into `reference_id`, so a missing entry is not something Fish can work
+ * around — it 400s ("Reference not found"). That is why loading an example and
+ * hitting Render used to fail outright, and why falling back to one default
+ * voice is the floor rather than the goal.
+ *
+ * The pick is about DISTINCTNESS, not casting. It draws from the most-used
+ * English TTS models and alternates between the female- and male-tagged groups,
+ * so consecutive speakers never sound alike. Whatever it picks is written onto
+ * the speaker cards, so it is visible and one click from being changed.
+ *
+ * @param {Array<{voiceId?: string, voiceName?: string}>} speakers
+ * @returns {Promise<number>} how many speakers were filled in
+ */
+async function autoAssignVoices(speakers) {
+  const need = speakers.filter(s => !s.voiceId);
+  if (!need.length) return 0;
+
+  let items = [];
+  try {
+    // Same call the voice picker opens with, so the pool is the same one.
+    const data = await fish.get('model', { page_size: 100, sort_by: 'task_count' });
+    items = data.items || [];
+  } catch { return 0; }          // offline / no key — caller falls back
+
+  const pool = items.filter(m =>
+    m && m._id && m.type === 'tts' && m.state === 'trained' &&
+    (m.languages || []).includes('en'));
+  if (!pool.length) return 0;
+
+  const used = new Set(speakers.map(s => s.voiceId).filter(Boolean));
+  const take = tag => pool.find(m => (m.tags || []).includes(tag) && !used.has(m._id));
+
+  let filled = 0;
+  for (const [i, sp] of need.entries()) {
+    const pick = take(i % 2 ? 'male' : 'female') || pool.find(m => !used.has(m._id));
+    if (!pick) break;
+    used.add(pick._id);
+    sp.voiceId = pick._id;
+    sp.voiceName = pick.title || pick._id;
+    filled++;
+  }
+  return filled;
 }
 
 function detectSpeakers() {
@@ -68,22 +131,46 @@ function detectSpeakers() {
 async function renderScene() {
   const script = $('#sceneScript').value.trim();
   if (!script) { toast('Write a scene first.', 'err'); return; }
-  let { speakers, turns } = D3.parseScene(script);
+  const { speakers, turns } = D3.parseScene(script);
   if (!scene.speakers.length) { scene.speakers = speakers.map(s => ({ name: s.name, voiceId: '', file: null })); render(); }
   if (!turns.length) { toast('No “Name: line” turns found.', 'err'); return; }
 
+  // Every speaker in the script needs a card before anything else: the voice
+  // auto-assign below writes onto the cards, and a card is how the pick stays
+  // visible and one click from being changed.
+  for (const s of speakers) {
+    if (!scene.speakers.some(x => x.name === s.name)) scene.speakers.push({ name: s.name, voiceId: '', file: null });
+  }
+
   // order speakers by the definition list, fall back to appearance
   const order = scene.speakers.filter(s => speakers.some(x => x.name === s.name));
-  for (const s of speakers) if (!order.some(o => o.name === s.name)) order.push(s);
-
   const idx = new Map(order.map((s, i) => [s.name, i]));
   const text = turns.map(t => `<|speaker:${idx.get(t.name) ?? 0}|>${t.text}`).join('');
-  const reference_id = order.map(s => s.voiceId || `speaker-${idx.get(s.name)}`);
-  const model = $('#sceneModel').value;
 
   const btn = $('#sceneRender');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rendering…';
   try {
+    // A speaker with no voice must NOT be sent as `speaker-<n>`. That string is
+    // not a voice model id, and Fish answers the whole request with
+    // 400 "Reference not found" — which is what made every example scene fail
+    // until a voice was typed into every card. (`speaker-<n>` only means
+    // anything alongside uploaded `references`, i.e. the with-references branch
+    // below.)
+    //
+    // The `<|speaker:n|>` markers index the reference_id list, so a partial list
+    // is not an option either: either every speaker has a real voice, or we
+    // send no reference_id at all and Fish speaks the scene in its default
+    // voice. Filling the gaps from the library is what makes the first case the
+    // common one.
+    if (order.some(s => !s.voiceId)) {
+      const filled = await autoAssignVoices(order);
+      if (filled) render();
+    }
+
+    const voiceIds = order.map(s => s.voiceId);
+    const noVoice = order.filter(s => !s.voiceId).map(s => s.name);
+    const model = $('#sceneModel').value;
+
     const anyFile = order.some(s => s.file);
     let blob;
     if (anyFile) {
@@ -95,12 +182,16 @@ async function renderScene() {
       fd.append('speakers', JSON.stringify(spk));
       blob = await apiFetch('/api/tts/with-references', { method: 'POST', body: fd });
     } else {
-      blob = await apiFetch('/api/tts', { method: 'POST', body: { text, reference_id, __model: model, format: 'mp3' } });
+      const body = { text, __model: model, format: 'mp3' };
+      if (!noVoice.length) body.reference_id = voiceIds;
+      blob = await apiFetch('/api/tts', { method: 'POST', body });
     }
     if (blob.type.includes('json')) throw new Error(JSON.parse(await blob.text()).message);
     scene.lastBlob = blob;
     showScenePlayer(blob, turns.length, order.length);
-    toast('Scene rendered.', 'ok');
+    toast(noVoice.length
+      ? `Scene rendered in the default voice — no voice set for ${noVoice.join(', ')}.`
+      : 'Scene rendered.', noVoice.length ? '' : 'ok');
   } catch (e) {
     toast('Scene render failed: ' + e.message, 'err');
   } finally {

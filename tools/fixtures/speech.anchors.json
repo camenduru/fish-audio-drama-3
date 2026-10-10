@@ -1,0 +1,60 @@
+{
+  "segments": [
+    {
+      "text": "The",
+      "start": 0.08,
+      "end": 0.24
+    },
+    {
+      "text": "old",
+      "start": 0.24,
+      "end": 0.48
+    },
+    {
+      "text": "lamp",
+      "start": 0.48,
+      "end": 0.8
+    },
+    {
+      "text": "still",
+      "start": 0.8,
+      "end": 1.12
+    },
+    {
+      "text": "flickers",
+      "start": 1.12,
+      "end": 1.84
+    },
+    {
+      "text": "Nobody",
+      "start": 2.56,
+      "end": 3.04
+    },
+    {
+      "text": "has",
+      "start": 3.04,
+      "end": 3.36
+    },
+    {
+      "text": "lit",
+      "start": 3.36,
+      "end": 3.6
+    },
+    {
+      "text": "it",
+      "start": 3.6,
+      "end": 3.68
+    },
+    {
+      "text": "in",
+      "start": 3.68,
+      "end": 3.92
+    },
+    {
+      "text": "years",
+      "start": 3.92,
+      "end": 4.64
+    }
+  ],
+  "audio_duration": 5.758548752834467
+}

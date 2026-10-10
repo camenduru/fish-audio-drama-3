@@ -130,46 +130,53 @@ NPC's real face atlas.
 - **Export** — `⬇ Both` writes the matched `.wav` + `.visemes.json` pair under
   `assets/audio/speech/en/33/`, ready to drop into the game.
 
-#### The baker is byte-identical to the game's
+#### The baker is checked against the audio, not against another baker
 
-`tools/visemes.py` here is a *different* baker from the game's
-`tools/gen_visemes.py` — it can pin the aligner to Fish's word timings instead of
-recovering them with an ASR — but it must emit a sidecar the game reads
-*identically*, or the preview lies about what ships. It does, and that is
-checked rather than assumed:
+`tools/visemes.py` is the studio's own baker: it pins the aligner to Fish's word
+timings instead of recovering them with an ASR. What matters is not that it
+agrees with some other implementation — it is that the mouth it emits actually
+follows the audio.
 
 ```bash
 python tools/compare_bakers.py --endpoint http://127.0.0.1:8756
 ```
 
-runs both bakers over the same WAV and diffs the cue timelines. It has three
-parts, and all three matter:
+runs it over a tracked fixture (`tools/fixtures/speech.wav` — a real streamed
+Fish line, with its Fish anchors) and checks four things:
 
-- **Parity** — game vs studio, speech guard **off**, with and without `--text`:
-  **identical cue timeline** (59/59 on the shipped `33_33000.wav`, values and
-  timings matching to the millisecond). This is the shipping claim.
-- **The guard is real** — the studio has an opt-in `--speech-guard` that
-  re-opens the mouth inside a word Fish reports as spoken (recovering soft
-  onsets the energy gate reads as silence). It needs Fish anchors, so without
-  them the flag is *inert* — and a naive harness would happily report a
-  meaningless "identical" for guard=on. This part asserts the flag is inert
-  without anchors **and** that it changes the output once anchors exist, so the
-  divergence is opt-in and cannot quietly become the default.
-- **The shipped HTTP path** — `POST /api/visemes` and diff *that* against the
-  game. The module agreeing is not enough; the flags the server actually passes
-  are what ships.
+- **Well-formed** — A–H/X only, sorted, non-overlapping, inside the audio,
+  starting at 0, `metadata.duration` matching the WAV. The format contract.
+- **The mouth moves where there is sound** — at most 5% of the *loud* frames may
+  be closed, measured off the WAV's own energy. **This is the part that catches
+  the real bug class**, and it exists because of one: Allosaurus emits the
+  230-symbol universal IPA inventory, but OpenFaceFX's `--phones-alphabet ipa`
+  table only knows 39 canonical spellings, so ordinary phones (`ə o ʀ ɹ̩ b̥ ɒ ɾ`)
+  fell through to `sil` and baked as a **closed** mouth — the first 0.58 s of a
+  line came out shut. `tools/visemes.py` now translates Allosaurus IPA → ARPAbet
+  and passes `--phones-alphabet arpabet`, where every symbol maps.
+- **Every Allosaurus phone reaches the viseme table** — the same failure isolated
+  as a unit test, over the recognizer's real English inventory (67 symbols) plus
+  the 21 that used to bake shut.
+- **The guard is real** — the opt-in `--speech-guard` needs Fish anchors, so
+  without them it is *inert*, and a naive harness would report a meaningless
+  "no effect". This part asserts it is inert without anchors **and** that it
+  changes the output once anchors exist.
 
-Every sidecar either baker emits is also run through the game's own
-`tools/check_viseme_assets.py::check_sidecar`, so "the game will load this" is
-verified, not assumed. Run it after touching either baker.
+With `--endpoint` it re-runs the well-formed and loud-audio checks against
+`POST /api/visemes`, because the flags the server passes are what the app ships.
 
-The parity work is three specific things, all of which used to differ:
+An earlier version of this harness diffed the studio's output against another
+baker and called that parity. It passed while the studio shipped a shut mouth —
+two implementations can share a misunderstanding, so agreement is not evidence.
+The audio is the reference.
+
+The timeline shape itself is still deliberately constrained by three things:
 
 | | the studio used to | now |
 |---|---|---|
 | **gap filling** | pad the timeline out to `duration` and fill gaps with X | sort/clamp/merge only — `VisemeTrack::Sample` returns `'X'` outside a cue, so a gap and an explicit X cue render identically |
 | **short cues** | drop any cue under 30 ms | keep them — the game *holds* a shape for `avatar.voice.mouth_min_hold` (0.05 s), so a 20 ms cue is a shape the game draws for 50 ms |
-| **speech guard** | always on | opt-in via `--speech-guard`; the default path matches the game |
+| **speech guard** | always on | opt-in via `--speech-guard` |
 
 **Adding an avatar** is dropping a folder into the game — no code change here.
 `assets/dialogue/<npc>/` needs:
@@ -353,8 +360,9 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/agents.js      agents console
   js/livecall.js    Web SDK live calls
 tools/visemes.py    the Fish-anchored viseme baker (openfacefx + allosaurus)
+tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
 tools/bake_debug.py run the baker directly and print the real traceback
-tools/compare_bakers.py  diff this baker against the game's gen_visemes.py
+tools/compare_bakers.py  studio-only viseme checks (well-formed, loud-audio, phones, guard)
 tools/verify_ui.cjs      headless-Chrome UI harness (33 checks)
 tools/verify_lipsync.cjs headless-Chrome lip-sync harness (58 checks, real API)
 tools/probe_duo.cjs      two-hander playback probe — no API, hand-built takes
@@ -381,7 +389,8 @@ NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 33/33, no credit ne
 NODE_PATH=.../node_modules node tools/probe_duo.cjs        # two-hander + min-hold, no credit needed
 NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # needs real API credit
 NODE_PATH=.../node_modules node tools/probe_call_failures.cjs   # call errors, no credit
-python tools/compare_bakers.py --endpoint http://127.0.0.1:8756   # baker parity
+python tools/compare_bakers.py                                    # viseme correctness, no credit
+python tools/compare_bakers.py --endpoint http://127.0.0.1:8756   # + the shipped HTTP path
 ```
 
 `compare_bakers.py` needs the **system** Python (the one with `numpy`,
