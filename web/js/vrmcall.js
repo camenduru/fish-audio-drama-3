@@ -814,6 +814,9 @@ export function initVrmCall() {
       mouthExpr: emote?.mouthWeight ?? null,
       mouthPreset: emote?.mouthPreset ?? null,
       emotion: emote?.emotion ?? null,
+      // The name and the weight diverge for the length of a blink: playEmotion names
+      // the emotion at once, the expression lands only once the eyes are open.
+      emotionExpr: emote?.emotionWeight ?? null,
       blinkExpr: emote?.blinkWeight ?? null,
       blinks: emote?.blinkCount ?? 0,
       frames,

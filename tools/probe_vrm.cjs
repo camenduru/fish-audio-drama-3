@@ -136,6 +136,36 @@ const check = (name, ok, detail = '') => {
   check('and the model genuinely needed squaring (this one ~9.4°)', squared > 5,
         `largest correction ${squared}°, head yaw now ${(await page.evaluate(() => window.__vrmcall().face)).headYaw}°`);
 
+  // --- the port matches ChatVRM's numbers, not just its shape ---------------
+  // emote.js is a port of five files, and the two that matter most are checked here
+  // directly rather than only through the live mouth: `cookVolume` against ChatVRM's
+  // own sigmoid and floor, and LipSync against a real AnalyserNode. LipSync has no
+  // caller in this app (the agent SDK hands us a level, not samples), which is
+  // exactly why it needs a test that constructs it.
+  const port = await page.evaluate(async () => {
+    const E = await import('/js/emote.js');
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ls = new E.LipSync(ctx);
+    return {
+      close: E.BLINK_CLOSE_MAX, open: E.BLINK_OPEN_MAX,
+      quiet: E.cookVolume(0), floor: E.cookVolume(0.05),
+      soft: E.cookVolume(0.15), loud: E.cookVolume(0.3),
+      // A real AnalyserNode with no signal connected: silence must be a shut mouth.
+      silent: ls.update().volume,
+      analyserFft: ls.timeDomainData.length,
+      hasPlay: typeof ls.playFromArrayBuffer === 'function' && typeof ls.playFromURL === 'function',
+    };
+  });
+  check('emote: ChatVRM\u2019s blink constants (0.12 s shut, 5 s open)',
+        port.close === 0.12 && port.open === 5, JSON.stringify({ close: port.close, open: port.open }));
+  check('emote: cookVolume matches ChatVRM\u2019s sigmoid and 0.1 floor',
+        port.quiet === 0 && port.floor === 0 && Math.abs(port.soft - 0.851953) < 0.002 && port.loud > 0.999,
+        `0→${port.quiet}, 0.05→${port.floor}, 0.15→${port.soft.toFixed(6)}, 0.3→${port.loud.toFixed(6)}`);
+  check('emote: LipSync reads silence as a shut mouth through a real analyser',
+        port.silent === 0 && port.analyserFft === 2048, `volume=${port.silent}, ${port.analyserFft} samples`);
+  check('emote: LipSync carries the whole playback path, not just analysis',
+        port.hasPlay === true);
+
   // --- the agent list loads on this page too ---------------------------------
   // It used to be created with loadOnInit:false and never filled, so this page had
   // an empty dropdown until you happened to focus it — the Call page did not.
@@ -372,6 +402,21 @@ const check = (name, ok, detail = '') => {
   const mood = await page.evaluate(() => window.__vrmcall());
   check('an emotion quarters the mouth weight (ChatVRM\u2019s rule)', mooded,
         `emote()=${set}, emotion=${mood.emotion}, mouth=${mood.mouth} → ${mood.mouthExpr}`);
+
+  // The other half of that rule: an emotion that arrives mid-blink must *wait* for
+  // the eyes to reopen, which is the reason AutoBlink.setEnable returns a delay at
+  // all. Clicking Blink then setting the emotion in the same tick puts the call
+  // inside the 0.12 s window where the implementation has to hold it back.
+  const held = await page.evaluate(async () => {
+    document.querySelector('#vrmBlinkNow')?.click();   // eyes shut for 0.12 s
+    window.__vrmcall.emote('angry');
+    const early = window.__vrmcall().emotionExpr;
+    await new Promise(r => setTimeout(r, 500));
+    return { early, later: window.__vrmcall().emotionExpr, emotion: window.__vrmcall().emotion };
+  });
+  check('an emotion arriving mid-blink waits for the eyes to reopen',
+        held.early === 0 && held.later === 1 && held.emotion === 'angry',
+        `weight ${held.early} → ${held.later} (${held.emotion})`);
 
   await page.evaluate(() => window.__vrmcall.emote('neutral'));
   const undone = await waitFor(() => {

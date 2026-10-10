@@ -208,6 +208,15 @@ export class ExpressionController {
   get mouthExpressionWeight() {
     return this.em?.getExpression?.(this.currentLipSync?.preset || this.mouthPreset)?.weight ?? null;
   }
+
+  /**
+   * The weight of the emotion being shown. Readable separately from `currentEmotion`
+   * because those differ for the length of a blink: the name changes the moment
+   * playEmotion is called, the expression only after the eyes reopen.
+   */
+  get emotionExpressionWeight() {
+    return this.em?.getExpression?.(this.currentEmotion)?.weight ?? null;
+  }
 }
 
 // --- emoteController.ts -----------------------------------------------------
@@ -243,6 +252,10 @@ export class EmoteController {
 
   get mouthWeight() {
     return this.expressionController.mouthExpressionWeight;
+  }
+
+  get emotionWeight() {
+    return this.expressionController.emotionExpressionWeight;
   }
 
   get blinkCount() {
