@@ -304,6 +304,7 @@ async function loadInfo() {
     return;
   }
   const i = state.info;
+  renderBakerNotice(i);
   // Keep which avatars the server actually found separate from the fallback:
   // the fallback below is never empty, which is what used to make the "not
   // found" branch below unreachable.
@@ -611,6 +612,49 @@ function drawTimeline(act = null, playhead = -1) {
   if (tlHead) tlHead.style.left = `${Math.max(0, Math.min(100, (playhead / dur) * 100))}%`;
 }
 
+/**
+ * Say up front when a bake cannot work here.
+ *
+ * `/api/lipsync/info` has always carried `baker: { script_exists, python_exists,
+ * openfacefx, … }`, and nothing read it. So a deploy missing the baker — the
+ * script is a separate file that has to be bundled into the function — looked
+ * completely normal until you pressed Bake and got a 502 naming a path you
+ * cannot see. This turns that into a message before the work is attempted.
+ *
+ * Only a definite `false` warns: `openfacefx` is `null` when the baker runs on a
+ * *different* interpreter than the server, which is the normal local setup and
+ * is not a problem.
+ */
+function renderBakerNotice(info) {
+  const box = $('#lsNotice');
+  if (!box) return;
+  const b = info?.baker || {};
+  const problems = [];
+  if (b.script_exists === false) {
+    problems.push(['the viseme baker is not in this deployment',
+      'tools/visemes.py has to be bundled into the function — check includeFiles in vercel.json.']);
+  }
+  if (b.python_exists === false) {
+    problems.push(['the baker’s interpreter is missing',
+      `it resolved to ${b.python || '(none)'}, which does not exist here.`]);
+  }
+  if (b.openfacefx === false) {
+    problems.push(['openfacefx is not installed for the baker',
+      'it is declared in requirements.txt, so a deploy that is missing it built from the wrong manifest.']);
+  }
+  if (!problems.length) {
+    box.replaceChildren();
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  box.classList.add('bad');
+  box.replaceChildren(el('span.ico', {}, '⚠'),
+    el('div', {}, problems.map(([title, why]) => el('div', {}, [
+      el('b', {}, title), el('div.hint', {}, why),
+    ]))));
+}
+
 function renderLegend() {
   const face = state.avatars[0]?.face || state.info?.face || {};
   const frames = face.frames || {};
@@ -876,8 +920,14 @@ async function bakeInto(take) {
       `silent, or the aligner misread it; try again or switch aligner`
     );
   }
-  // Keep the repaired WAV — that is what the game should load.
-  take.wavBytes = Uint8Array.from(atob(out.wav_base64), c => c.charCodeAt(0));
+  // Keep the repaired WAV — that is what the game should load. Repaired here
+  // rather than echoed back by the server: it is the same two-field fix the
+  // baker applies (verified byte-for-byte in verify_lipsync.cjs), and returning
+  // it as base64 added 33% to the response, which on a hosted deploy is capped
+  // just like the request — so a long line could be accepted and then die on the
+  // way back with nothing naming the cause. `bytes` is the array already sent;
+  // the Blob above copied it, so repairing it in place is safe.
+  take.wavBytes = fixWavHeader(bytes);
   out.stats.roundTripMs = Math.round(performance.now() - t0);
   L.setSidecar(take.id, out.sidecar, out.stats);
   return out;

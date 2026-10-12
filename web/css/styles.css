@@ -595,3 +595,16 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .vrm-empty .big { font-size: 46px; line-height: 1; opacity: .55; }
 .vrm-empty .mt { pointer-events: none; }
 .vrm-bar { display: flex; align-items: center; gap: 12px; max-width: 900px; margin: 0 auto; padding: 0 2px; flex: 0 0 auto; }
+
+/* A page-level warning that is not a toast. It stays put while the reader deals
+   with what it is about — a deploy missing the viseme baker, say — which a
+   toast cannot do: a toast is gone by the time you have read it twice. */
+.notice {
+  display: flex; gap: 10px; align-items: flex-start;
+  margin: 0 0 12px; padding: 10px 12px; border-radius: 8px;
+  font-size: 12px; line-height: 1.5; color: var(--text);
+  background: rgba(240,180,41,.10); border: 1px solid rgba(240,180,41,.30);
+}
+.notice .ico { flex: none; }
+.notice code { font-size: 11px; color: var(--text-2); }
+.notice.bad { background: rgba(240,90,90,.10); border-color: rgba(240,90,90,.30); }

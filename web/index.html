@@ -420,6 +420,12 @@
           </div>
 
           <div class="scroll grow pad">
+            <!-- A deploy can be missing the baker outright — it is a separate
+                 file that has to be bundled — or the interpreter it shells out
+                 to. The server reports both in /api/lipsync/info; saying so
+                 here is the difference between "Bake does nothing" and a
+                 message that names the cause. -->
+            <div id="lsNotice" class="hidden"></div>
             <div class="ls-wrap">
               <div class="ls-stages" id="lsStages"></div>
               <div class="ls-controls">

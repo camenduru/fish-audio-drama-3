@@ -600,6 +600,86 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   check('settings: key status badge', /key/.test(keyBadge), keyBadge);
   await page.screenshot({ path: OUT + '/settings.png' });
 
+  // 13. Lip Sync — the baker notice.
+  //
+  // When the baker is not in a deployment (a serverless bundle that missed
+  // tools/visemes.py) the only symptom used to be a 502 from Bake, naming a
+  // path you cannot see. `/api/lipsync/info` has always carried
+  // `baker: {script_exists, python_exists, openfacefx}` and nothing read it.
+  //
+  // Two things have to be true at once: it warns on a broken deploy, and it
+  // stays SILENT on a healthy one. `openfacefx` is null — not false — whenever
+  // the baker runs on a different interpreter, which is the normal local setup,
+  // so a truthiness test here would put a permanent false alarm on the page.
+  await page.setRequestInterception(true);
+  let infoOverride = null;
+  page.on('request', req => {
+    if (infoOverride && req.url().includes('/api/lipsync/info')) {
+      req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(infoOverride) });
+    } else {
+      req.continue();
+    }
+  });
+
+  const noticeState = () => page.evaluate(() => {
+    const b = document.querySelector('#lsNotice');
+    return {
+      hidden: b.classList.contains('hidden'),
+      display: getComputedStyle(b).display,
+      bad: b.classList.contains('bad'),
+      text: b.textContent.replace(/\s+/g, ' ').trim(),
+    };
+  });
+  // A hash-only change is a same-document navigation: the app's router switches
+  // views but initLipsync() — and therefore loadInfo() — never runs again. The
+  // first attempt at this test navigated with page.goto('#lipsync') and every
+  // state read back the boot-time payload, so a broken baker looked healthy.
+  // A changing query string forces a genuine document load.
+  let nonce = 0;
+  const gotoLipsync = async () => {
+    await page.goto(`${BASE}/?n=${++nonce}#lipsync`, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 900));
+  };
+
+  await gotoLipsync();
+  const healthy = await noticeState();
+  const realInfo = await page.evaluate(async () => (await fetch('/api/lipsync/info')).json());
+  check('lipsync: a healthy baker raises no notice',
+        healthy.hidden && healthy.display === 'none' && !healthy.text,
+        `hidden=${healthy.hidden} text="${healthy.text}"`);
+
+  infoOverride = { ...realInfo, baker: { ...realInfo.baker, script_exists: false } };
+  await gotoLipsync();
+  const noScript = await noticeState();
+  check('lipsync: a baker script missing from the deploy warns before Bake',
+        !noScript.hidden && noScript.bad &&
+        /not in this deployment/i.test(noScript.text) && /includeFiles/.test(noScript.text),
+        noScript.text.slice(0, 130));
+
+  infoOverride = { ...realInfo, baker: { ...realInfo.baker, python_exists: false } };
+  await gotoLipsync();
+  const noPython = await noticeState();
+  check('lipsync: a missing baker interpreter warns and names the path',
+        !noPython.hidden && /interpreter is missing/i.test(noPython.text),
+        noPython.text.slice(0, 130));
+
+  infoOverride = { ...realInfo, baker: { ...realInfo.baker, openfacefx: null, allosaurus: null, probe: 'external' } };
+  await gotoLipsync();
+  const external = await noticeState();
+  check('lipsync: an external baker interpreter (openfacefx null) is not a false alarm',
+        external.hidden && !external.text,
+        `hidden=${external.hidden} text="${external.text.slice(0, 90)}"`);
+
+  infoOverride = { ...realInfo, baker: { ...realInfo.baker, openfacefx: false } };
+  await gotoLipsync();
+  const noOface = await noticeState();
+  check('lipsync: a definite openfacefx:false does warn',
+        !noOface.hidden && /openfacefx is not installed/i.test(noOface.text),
+        noOface.text.slice(0, 130));
+
+  infoOverride = null;
+  await page.setRequestInterception(false);
+
   console.log('\n===== CHECKS =====');
   results.forEach(r => console.log(r));
   console.log('\n===== CONSOLE ERRORS (' + errors.length + ') =====');

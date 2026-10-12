@@ -661,8 +661,10 @@ Leave it unset and nothing changes, so local development stays open.
   HTTPS.
 - **The harnesses keep working.** Everything in `tools/` that drives the UI
   reads `APP_PASSWORD` (environment first, then `.env`, as the server does) and
-  signs in through `tools/session.cjs` before it starts. With no password set the
-  helper does nothing, so an open studio is unaffected. The one exception is
+  signs in through `tools/session.cjs` before it starts. `verify_bake_contract.cjs`
+  talks to `/api/visemes` with `fetch` rather than a page, and gets its cookie
+  from the same helper's `apiCookie()`. With no password set the helper does
+  nothing, so an open studio is unaffected. The one exception is
   `tools/compare_bakers.py`, which posts to `/api/visemes` over plain HTTP and
   needs an ungated studio or the session cookie.
 
@@ -695,10 +697,10 @@ system Python, and the game folder next door. It detects `VERCEL` and adapts.
 | --- | --- |
 | `data/` is writable | Falls back to a temp directory and reports `data_dir_persistent: false`; takes and presets live as long as the instance. |
 | `.env` is writable | Nothing is written. Setup says the key has to come from the host's environment instead of offering a save that cannot stick. |
-| The baker runs on a system Python | Falls back to the function's own interpreter, which has `numpy` + `openfacefx` from the manifest. |
-| Allosaurus is available | It isn't: it requires torch, far past the 500 MB Python bundle limit. The baker uses the Fish word-timing aligner instead (`aligner: "anchors"`) — the word boundaries are still Fish's own, only the phone-level shapes are coarser. |
+| The baker runs on a system Python | Falls back to the function's own interpreter, which has `numpy` + `openfacefx` from the manifest. `tools/visemes.py` is a separate file rather than an import, so nothing can trace it — but a Python function is **not tree-shaken**: Vercel bundles every file reachable at build time, so it ships anyway and the `includeFiles` entry is a redundant safety net. If the script or the interpreter is missing the page now says so *before* you press Bake, instead of failing with a `502` naming a path you cannot see. |
+| Allosaurus is available | It isn't: it requires torch, far past the Python bundle limit. The baker uses the Fish word-timing aligner instead (`aligner: "anchors"`) — the word boundaries are still Fish's own, only the phone-level shapes are coarser. |
 | The game folder exists | It doesn't, so the portrait preview says so; generating and exporting the `.wav` + `.visemes.json` pair still works. |
-| No request size cap | Vercel rejects a body over 4.5 MB, so the Lip Sync page measures the WAV against the advertised limit and explains, rather than surfacing a bare `413`. |
+| No request size cap | Vercel rejects a body over 4.5 MB — **and a response over 4.5 MB too**. The Lip Sync page measures the WAV against the advertised limit and explains, rather than surfacing a bare `413`. See [the response cap](#the-4-5-mb-cap-is-on-both-directions). |
 
 `/api/status` reports all of it — `hosted`, `data_dir_persistent`,
 `key_source`, `max_upload_bytes`, `baker` — so the UI can state what a deploy
@@ -709,10 +711,44 @@ cannot do instead of failing obscurely.
 - **Duration.** A Hobby function is capped at 300 s *and* that is its maximum
   (Pro allows up to 800). The proxy's own HTTP timeout is 600 s, so a very long
   generation can still outlive the platform. `vercel.json` sets 300.
-- **Body size.** 4.5 MB per request or response. A 60-minute `transcribe-1-pro`
-  recording is 100+ MB and cannot be uploaded through a function at all.
+- **Body size.** 4.5 MB per request **or response**. A 60-minute `transcribe-1-pro`
+  recording is 100+ MB and cannot be uploaded through a function at all. See
+  [the 4.5 MB cap](#the-4-5-mb-cap-is-on-both-directions).
 - **No persistent disk.** Takes, presets and uploaded reference audio are
   per-instance and disappear with it.
+- **Function bundle size.** 250 MB uncompressed for most runtimes, **500 MB for
+  Python**. A Python function is not tree-shaken — it ships every file reachable
+  at build time — so the only lever is `excludeFiles` in `vercel.json`. That is
+  why `pyproject.toml` / `requirements.txt` list runtime dependencies only: a
+  test runner or a notebook kernel in there is dead weight on every cold start.
+  (Vercel also offers large functions up to 5 GB on fluid compute.)
+
+#### The 4.5 MB cap is on both directions
+
+The request side is the obvious one. The response side is the one that bit.
+
+Baking used to send the repaired WAV back alongside the sidecar, base64-encoded.
+Base64 costs 4/3 the bytes (`ceil(n/3)*4`), so a request that fit under the
+advertised 4.4 MB limit produced a response of `4/3 × 4.4 MB ≈ 5.9 MB` — over
+the cap. The practical ceiling was therefore not 4.4 MB of audio but
+
+    4.5 MB / (4/3)  ≈  3.38 MB  ≈  40 s at 44.1 kHz / 16-bit mono
+
+and a line longer than that failed with no message naming the cause.
+
+The echo is gone. It was redundant: `repair_wav` rewrites exactly two header
+fields, and the browser already had the identical repair in `fixWavHeader()`.
+`tools/verify_wav_repair.cjs` now proves the two agree byte-for-byte — over the
+placeholder header Fish actually streams, an odd-sized chunk (which exercises
+the `size & 1` pad step), a correct header, and a non-RIFF file. It runs as the
+first block of `verify_lipsync.cjs` and standalone with no API credit:
+
+```bash
+node tools/verify_wav_repair.cjs
+```
+
+The response is now the sidecar alone — a few KB, flat in the length of the
+audio — so the usable line length is the full request-side limit.
 
 Local development is unchanged: without `VERCEL` the studio keeps `data/`, the
 system Python and the game folder exactly as before.
@@ -747,10 +783,12 @@ tools/visemes.py    the Fish-anchored viseme baker (openfacefx, optional allosau
 tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
 tools/bake_debug.py run the baker directly and print the real traceback
 tools/compare_bakers.py  studio-only viseme checks (well-formed, loud-audio, phones, guard)
-tools/verify_ui.cjs      headless-Chrome UI harness (59 checks)
+tools/verify_ui.cjs      headless-Chrome UI harness (64 checks)
 tools/probe_variables.cjs  the agent-variables round trip + the variable-name rule (live API)
 tools/probe_clone_fidelity.py  how faithfully each TTS model reproduces a reference voice
-tools/verify_lipsync.cjs headless-Chrome lip-sync harness (58 checks, real API)
+tools/verify_lipsync.cjs headless-Chrome lip-sync harness (63 checks, real API)
+tools/verify_wav_repair.cjs  browser vs baker WAV-header repair, byte-for-byte (no API)
+tools/verify_bake_contract.cjs  the bake response carries the sidecar, not the audio (no API)
 tools/probe_duo.cjs      two-hander playback probe — no API, hand-built takes
 tools/probe_examples.cjs  synthesize the complex examples end to end (1 call each)
 tools/probe_call.cjs      drive the real Live Call UI and unwrap the error chain
@@ -771,12 +809,14 @@ openapi.json        cached Fish Audio OpenAPI schema
 ## Verification
 
 ```bash
-NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 59/59, no credit needed
+NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 64/64, no credit needed
 NODE_PATH=.../node_modules node tools/probe_duo.cjs        # two-hander + min-hold, no credit needed
-NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # needs real API credit
+NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # 63/63 — needs real API credit
 NODE_PATH=.../node_modules node tools/probe_call_failures.cjs   # call errors, no credit
 NODE_PATH=.../node_modules node tools/probe_vrm.cjs             # 53/53 — the bundled avatar, its idle clip, and an agent's body by URL
 NODE_PATH=.../node_modules node tools/probe_vrm.cjs avatar.vrm  # also: my own model over the default
+node tools/verify_wav_repair.cjs                           # 3/3 — the two WAV repairs agree byte-for-byte, no credit
+node tools/verify_bake_contract.cjs                        # 6/6 — the bake response is flat in clip length, no credit
 node tools/probe_variables.cjs                             # 9/9 — the agent-variables round trip (writes and restores one key)
 python tools/probe_clone_fidelity.py                       # does the clone sound like the voice? (spends credit)
 python tools/probe_clone_fidelity.py --vs-default           # …and how far it sits from the generic default voice

@@ -9,6 +9,7 @@
  */
 const puppeteer = require('puppeteer-core');
 const { signIn } = require('./session.cjs');
+const { runChecks: runWavRepairChecks } = require('./verify_wav_repair.cjs');
 
 const APP = process.env.APP_URL || 'http://127.0.0.1:8756';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -32,6 +33,15 @@ async function waitFor(fn, { tries = 120, every = 1000 } = {}) {
 }
 
 (async () => {
+  // ---- first, the proof the bake endpoint's contract depends on ----------
+  //
+  // The bake response no longer echoes the repaired WAV (see server/main.py).
+  // That is only safe while the browser's own fixWavHeader() produces the
+  // identical bytes to the baker's repair_wav(). Pure byte comparison, no
+  // credit, no browser — but it runs here because this is the harness the
+  // server comment points at.
+  await runWavRepairChecks(check);
+
   const browser = await puppeteer.launch({
     executablePath: CHROME, headless: 'new',
     args: ['--no-sandbox', '--disable-gpu', '--autoplay-policy=no-user-gesture-required'],
@@ -138,6 +148,27 @@ async function waitFor(fn, { tries = 120, every = 1000 } = {}) {
     }
   });
 
+  // The bake response must carry the sidecar and NOTHING else.
+  //
+  // It used to echo the repaired WAV back as `wav_base64`. Base64 inflates by
+  // 4/3, and a hosted deploy caps the response at 4.5 MB exactly as it caps the
+  // request — so the echo silently cut the usable line length from ~4.4 MB of
+  // audio to ~3.4 MB, and the failure named nothing. Capture the real response
+  // so this cannot come back.
+  const bakeResponses = [];
+  page.on('response', async r => {
+    if (r.request().method() === 'POST' && r.url().includes('/api/visemes')) {
+      let body = null;
+      try { body = await r.json(); } catch {}
+      bakeResponses.push({
+        status: r.status(),
+        bytes: Number(r.headers()['content-length'] || 0),
+        keys: body ? Object.keys(body).sort() : [],
+        hasWav: body ? Object.keys(body).some(k => /wav|audio|base64/i.test(k)) : false,
+      });
+    }
+  });
+
   await page.$eval('#lsScript', e => {
     e.value = '[calm] The old lamp still flickers. [pause] Nobody has lit it in years.';
   });
@@ -164,6 +195,13 @@ async function waitFor(fn, { tries = 120, every = 1000 } = {}) {
 
   const cues = await page.$$eval('#lsTimeline .tl-cue', e => e.length);
   check('cue timeline rendered', cues > 5, cues + ' blocks');
+
+  const bake = bakeResponses[0];
+  check('the bake response carries the sidecar, not the audio',
+    !!bake && bake.status === 200 && !bake.hasWav &&
+    bake.keys.includes('sidecar') && bake.bytes > 0 && bake.bytes < 512 * 1024,
+    bake ? `${bake.status} · ${bake.bytes} B · keys=[${bake.keys.join(',')}]`
+         : 'no /api/visemes response seen');
 
   // ---- does the mouth ACTUALLY move? ----
   await page.$eval('#lsPlay', e => e.click());
@@ -368,6 +406,36 @@ async function waitFor(fn, { tries = 120, every = 1000 } = {}) {
     grabbed.json ? grabbed.json.length + ' bytes' : 'nothing captured');
   check('wav produced by the export', (grabbed.audio || 0) > 1000,
     grabbed.audio ? Math.round(grabbed.audio / 1024) + ' KB' : 'nothing captured');
+
+  // The server no longer sends the repaired WAV back, so the file the user
+  // downloads is repaired entirely in the browser. Prove the header is right —
+  // an unrepaired one reads as 48695 s in any header-trusting tool.
+  const exported = await page.evaluate(async () => {
+    const b = window.__blobs.find(x => (x.type || '').includes('audio'));
+    if (!b) return null;
+    const u8 = new Uint8Array(await b.arrayBuffer());
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const tag = o => String.fromCharCode(u8[o], u8[o + 1], u8[o + 2], u8[o + 3]);
+    if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE') return { isRiff: false, len: u8.length };
+    let off = 12, dataOff = -1;
+    while (off + 8 <= u8.length) {
+      const cid = tag(off), sz = dv.getUint32(off + 4, true);
+      if (cid === 'data') { dataOff = off; break; }
+      off += 8 + sz + (sz & 1);
+    }
+    return {
+      isRiff: true, len: u8.length,
+      riff: dv.getUint32(4, true),
+      data: dataOff >= 0 ? dv.getUint32(dataOff + 4, true) : -1,
+      real: dataOff >= 0 ? u8.length - (dataOff + 8) : -1,
+    };
+  });
+  check('the exported WAV header was repaired client-side',
+    !!exported && exported.isRiff && exported.riff === exported.len - 8 &&
+    exported.data === exported.real && exported.real > 0,
+    exported
+      ? `RIFF ${exported.riff} (want ${exported.len - 8}) · data ${exported.data} (really ${exported.real})`
+      : 'no audio blob captured');
 
   if (grabbed.json) {
     const sc = JSON.parse(grabbed.json);

@@ -14,7 +14,6 @@ Run:  python -m uvicorn server.main:app --host 127.0.0.1 --port 8756
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import hmac
 import importlib.util
@@ -872,7 +871,9 @@ async def bake_visemes(
 
     Input: the WAV from the streaming TTS endpoint plus the word timings that
     same call returned. Output: the .visemes.json sidecar the game's
-    VisemeTrack loads, and the WAV with its header repaired.
+    VisemeTrack loads — and nothing else. The caller repairs its own WAV header
+    with the same two-field fix; echoing the audio back would add 33% to the
+    response for no information.
     """
     if not VISEME_SCRIPT.exists():
         raise HTTPException(status_code=500, detail=f"baker missing: {VISEME_SCRIPT}")
@@ -907,10 +908,16 @@ async def bake_visemes(
                 raise RuntimeError((proc.stderr or proc.stdout or "bake failed").strip())
 
             sidecar = json.loads(out_path.read_text(encoding="utf-8"))
-            fixed = wav_path.read_bytes()          # repair_wav rewrote it in place
+            # The repaired WAV is deliberately NOT returned. `repair_wav` only
+            # rewrites two header fields (see tools/visemes.py), and the browser
+            # has the identical repair in fixWavHeader() — verified byte-for-byte
+            # in tools/verify_lipsync.cjs. Sending it back base64-encoded cost
+            # 1.33x the audio on the *response*, and a hosted deploy caps the
+            # response at 4.5 MB just like the request, which silently cut the
+            # usable line length from 4.4 MB to ~3.4 MB — a bake that fails with
+            # no message that names the cause.
             return {
                 "sidecar": sidecar,
-                "wav_base64": base64.b64encode(fixed).decode("ascii"),
                 "log": (proc.stdout or "").strip(),
             }
 
