@@ -688,6 +688,36 @@ from the environment over `.env`, which matters because a deploy has no writable
 protection](#password-protection)) — on a public deployment you almost
 certainly want it, since the server holds your Fish key.
 
+### Telling whether the deploy is current
+
+The top-right corner of the window carries the commit this instance is running —
+`62de502`. Open the deployed URL and `localhost` and compare the two: equal
+shas mean the deploy has your latest commit.
+
+The colour says which side you are looking at, because a sha on its own cannot
+tell you whether you are on Vercel or on your own machine:
+
+| Badge | Means |
+| --- | --- |
+| grey `62de502` | a clean local checkout |
+| amber `62de502*` | local, with uncommitted changes |
+| green `62de502` | Vercel, production |
+| violet `62de502` | Vercel, a preview/branch deployment |
+| `no commit` | no repo and no build metadata — see below |
+
+The `*` matters more than it looks. A deploy is built from a commit, so it can
+never carry uncommitted edits — which makes a dirty local tree the one case
+where two *matching* shas still mean different code. Hover for the branch,
+commit subject and deployment id; click to copy the full sha.
+
+`/api/status` carries the same thing as `build`, from
+`VERCEL_GIT_COMMIT_SHA` / `_REF` / `_MESSAGE` and `VERCEL_DEPLOYMENT_ID` on a
+deploy, and from `git rev-parse` locally. Those system variables are populated
+at **runtime** as well as build time — but only when **Enable access to System
+Environment Variables** is ticked in Project → Settings → Environment
+Variables. If it is not, the badge says `no commit` rather than showing a blank
+or a stale sha, and the tooltip names the setting to check.
+
 ### What changes on a serverless host
 
 The backend was written for a local machine: a writable project directory, a
@@ -699,7 +729,7 @@ system Python, and the game folder next door. It detects `VERCEL` and adapts.
 | `.env` is writable | Nothing is written. Setup says the key has to come from the host's environment instead of offering a save that cannot stick. |
 | The baker runs on a system Python | Falls back to the function's own interpreter, which has `numpy` + `openfacefx` from the manifest. `tools/visemes.py` is a separate file rather than an import, so nothing can trace it — but a Python function is **not tree-shaken**: Vercel bundles every file reachable at build time, so it ships anyway and the `includeFiles` entry is a redundant safety net. If the script or the interpreter is missing the page now says so *before* you press Bake, instead of failing with a `502` naming a path you cannot see. |
 | Allosaurus is available | It isn't: it requires torch, far past the Python bundle limit. The baker uses the Fish word-timing aligner instead (`aligner: "anchors"`) — the word boundaries are still Fish's own, only the phone-level shapes are coarser. |
-| The game folder exists | It doesn't, so the portrait preview says so; generating and exporting the `.wav` + `.visemes.json` pair still works. |
+| The game folder exists | It doesn't — so the avatar art comes from the copy bundled at `web/avatars/`. The preview draws normally; only *other* npcs are missing. `/api/lipsync/info` reports `avatar_source: "game"` or `"bundled"` so the two can be told apart. |
 | No request size cap | Vercel rejects a body over 4.5 MB — **and a response over 4.5 MB too**. The Lip Sync page measures the WAV against the advertised limit and explains, rather than surfacing a bare `413`. See [the response cap](#the-4-5-mb-cap-is-on-both-directions). |
 
 `/api/status` reports all of it — `hosted`, `data_dir_persistent`,
@@ -722,6 +752,35 @@ cannot do instead of failing obscurely.
   why `pyproject.toml` / `requirements.txt` list runtime dependencies only: a
   test runner or a notebook kernel in there is dead weight on every cold start.
   (Vercel also offers large functions up to 5 GB on fluid compute.)
+
+#### The avatar has to ship, not just be referenced
+
+`/api/lipsync/info` hands the page two URLs for the default avatar:
+
+    /api/avatar/33/33_default.png        the portrait
+    /api/avatar/33/33_default_face.png   the mouth-shape atlas
+
+Both are served out of `DIALOGUE_ROOT` — the game folder next door. A deploy has
+no game folder, so `discover_avatars()` returned nothing, the fallback to those
+two hard-coded URLs 404'd, and the Lip Sync canvas stayed blank. Nothing on
+screen named the cause; the console showed only two failed image requests.
+
+`web/avatars/33/` now carries a copy, and `web/**` is already in
+`vercel.json`'s `includeFiles`, so it ships. The game folder is still searched
+first, so a local preview keeps tracking the game rather than a stale snapshot.
+`web/avatars/avatar.json` carries the matching `avatar` block from
+`game_settings.json` (blink schedule, mouth-hold, viseme map) for the same
+reason — without it the preview loses its blink timing and stops matching the
+game it exists to preview.
+
+`tools/verify_avatar_fallback.cjs` launches a server with `VERCEL=1` and a
+`ROGUELIKE_ROOT` that does not exist — reproducing the deploy exactly — and
+asserts the portrait still draws. It also fails if the bundled copy has drifted
+from the game's:
+
+```bash
+node tools/verify_avatar_fallback.cjs
+```
 
 #### The 4.5 MB cap is on both directions
 
@@ -779,16 +838,19 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/emote.js       ChatVRM's expression side — lip sync, emotions, blinking, look-at
   js/agentvars.js   an agent's variables.defaults on the server (the VRM URL lives here)
   vrm/              the bundled default avatar + idle clip (6.9 MB, served by the studio)
+  avatars/33/       the 2D portrait + mouth-shape atlas, so Lip Sync works on a deploy
+  avatars/avatar.json  the game's `avatar` block: blink, mouth-hold, viseme map
 tools/visemes.py    the Fish-anchored viseme baker (openfacefx, optional allosaurus)
 tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
 tools/bake_debug.py run the baker directly and print the real traceback
 tools/compare_bakers.py  studio-only viseme checks (well-formed, loud-audio, phones, guard)
-tools/verify_ui.cjs      headless-Chrome UI harness (64 checks)
+tools/verify_ui.cjs      headless-Chrome UI harness (75 checks)
 tools/probe_variables.cjs  the agent-variables round trip + the variable-name rule (live API)
 tools/probe_clone_fidelity.py  how faithfully each TTS model reproduces a reference voice
 tools/verify_lipsync.cjs headless-Chrome lip-sync harness (63 checks, real API)
 tools/verify_wav_repair.cjs  browser vs baker WAV-header repair, byte-for-byte (no API)
 tools/verify_bake_contract.cjs  the bake response carries the sidecar, not the audio (no API)
+tools/verify_avatar_fallback.cjs  the Lip Sync avatar on a deploy with no game folder (no API)
 tools/probe_duo.cjs      two-hander playback probe — no API, hand-built takes
 tools/probe_examples.cjs  synthesize the complex examples end to end (1 call each)
 tools/probe_call.cjs      drive the real Live Call UI and unwrap the error chain
@@ -809,7 +871,7 @@ openapi.json        cached Fish Audio OpenAPI schema
 ## Verification
 
 ```bash
-NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 64/64, no credit needed
+NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 75/75, no credit needed
 NODE_PATH=.../node_modules node tools/probe_duo.cjs        # two-hander + min-hold, no credit needed
 NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # 63/63 — needs real API credit
 NODE_PATH=.../node_modules node tools/probe_call_failures.cjs   # call errors, no credit
@@ -817,6 +879,7 @@ NODE_PATH=.../node_modules node tools/probe_vrm.cjs             # 53/53 — the 
 NODE_PATH=.../node_modules node tools/probe_vrm.cjs avatar.vrm  # also: my own model over the default
 node tools/verify_wav_repair.cjs                           # 3/3 — the two WAV repairs agree byte-for-byte, no credit
 node tools/verify_bake_contract.cjs                        # 6/6 — the bake response is flat in clip length, no credit
+node tools/verify_avatar_fallback.cjs                      # 15/15 — the Lip Sync avatar on a deploy with no game folder
 node tools/probe_variables.cjs                             # 9/9 — the agent-variables round trip (writes and restores one key)
 python tools/probe_clone_fidelity.py                       # does the clone sound like the voice? (spends credit)
 python tools/probe_clone_fidelity.py --vs-default           # …and how far it sits from the generic default voice

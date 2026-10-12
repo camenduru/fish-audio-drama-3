@@ -139,6 +139,11 @@ label.field > span { display: block; font-size: 11px; text-transform: uppercase;
 .badge.red   { background: rgba(255,107,107,.14); color: var(--red); }
 .badge.accent{ background: rgba(255,122,89,.16); color: var(--accent-2); }
 .badge.violet{ background: rgba(139,140,255,.16); color: var(--violet); }
+/* The commit badge. Mono so the sha is unambiguous (0/O, 1/l), and clickable to
+   copy the full sha. Uses filter rather than a background on :hover so it does
+   not fight the colour classes above, which all set their own background. */
+.badge.commit { font-family: var(--mono); cursor: pointer; letter-spacing: 0; }
+.badge.commit:hover { filter: brightness(1.35); }
 .divider { height: 1px; background: var(--line); margin: 16px 0; border: 0; }
 .mono { font-family: var(--mono); }
 

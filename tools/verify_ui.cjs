@@ -19,7 +19,7 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   const media = [];
   page.on('response', r => { if (r.url().includes('r2.fish.audio')) media.push(r.status()); });
   page.on('console', m => {
-    if (m.type() === 'error') errors.push(m.text());
+    if (m.type() === 'error' && !expectFailures) errors.push(m.text());
     if (m.type() === 'warning') warns.push(m.text());
   });
   page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
@@ -27,6 +27,11 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
 
   const results = [];
   const check = (name, ok, extra = '') => { results.push(`${ok ? 'PASS' : 'FAIL'}  ${name}${extra ? '  — ' + extra : ''}`); };
+
+  // Raised while the harness itself makes a request fail on purpose, so the
+  // console noise it causes is not counted against the page. Scoped rather than
+  // pattern-matched, so a real 500 still fails the run.
+  let expectFailures = false;
 
   await page.goto(BASE + '/#studio', { waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(r => setTimeout(r, 900));
@@ -612,10 +617,21 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   // the baker runs on a different interpreter, which is the normal local setup,
   // so a truthiness test here would put a permanent false alarm on the page.
   await page.setRequestInterception(true);
-  let infoOverride = null;
+  // One interception handler for the whole run. Registering a second one would
+  // mean two handlers both calling req.continue() on the same request, which
+  // throws — so every override goes through this single object.
+  const overrides = { info: null, status: null };
   page.on('request', req => {
-    if (infoOverride && req.url().includes('/api/lipsync/info')) {
-      req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(infoOverride) });
+    const u = req.url();
+    if (overrides.info && u.includes('/api/lipsync/info')) {
+      req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(overrides.info) });
+    } else if (overrides.status && u.includes('/api/status')) {
+      const bad = overrides.status.__fail;
+      req.respond({
+        status: bad ? 500 : 200,
+        contentType: 'application/json',
+        body: JSON.stringify(bad ? { detail: 'boom' } : overrides.status),
+      });
     } else {
       req.continue();
     }
@@ -648,7 +664,14 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
         healthy.hidden && healthy.display === 'none' && !healthy.text,
         `hidden=${healthy.hidden} text="${healthy.text}"`);
 
-  infoOverride = { ...realInfo, baker: { ...realInfo.baker, script_exists: false } };
+  // A checkout with the game folder must keep using the game's art, not the
+  // copy bundled for deploys — otherwise the local preview silently stops
+  // tracking the game. tools/verify_avatar_fallback.cjs covers the other side.
+  check('lipsync: a local checkout draws from the game, not the bundled copy',
+        realInfo.avatar_source === 'game',
+        `avatar_source=${realInfo.avatar_source}`);
+
+  overrides.info = { ...realInfo, baker: { ...realInfo.baker, script_exists: false } };
   await gotoLipsync();
   const noScript = await noticeState();
   check('lipsync: a baker script missing from the deploy warns before Bake',
@@ -656,28 +679,148 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
         /not in this deployment/i.test(noScript.text) && /includeFiles/.test(noScript.text),
         noScript.text.slice(0, 130));
 
-  infoOverride = { ...realInfo, baker: { ...realInfo.baker, python_exists: false } };
+  overrides.info = { ...realInfo, baker: { ...realInfo.baker, python_exists: false } };
   await gotoLipsync();
   const noPython = await noticeState();
   check('lipsync: a missing baker interpreter warns and names the path',
         !noPython.hidden && /interpreter is missing/i.test(noPython.text),
         noPython.text.slice(0, 130));
 
-  infoOverride = { ...realInfo, baker: { ...realInfo.baker, openfacefx: null, allosaurus: null, probe: 'external' } };
+  overrides.info = { ...realInfo, baker: { ...realInfo.baker, openfacefx: null, allosaurus: null, probe: 'external' } };
   await gotoLipsync();
   const external = await noticeState();
   check('lipsync: an external baker interpreter (openfacefx null) is not a false alarm',
         external.hidden && !external.text,
         `hidden=${external.hidden} text="${external.text.slice(0, 90)}"`);
 
-  infoOverride = { ...realInfo, baker: { ...realInfo.baker, openfacefx: false } };
+  overrides.info = { ...realInfo, baker: { ...realInfo.baker, openfacefx: false } };
   await gotoLipsync();
   const noOface = await noticeState();
   check('lipsync: a definite openfacefx:false does warn',
         !noOface.hidden && /openfacefx is not installed/i.test(noOface.text),
         noOface.text.slice(0, 130));
 
-  infoOverride = null;
+  overrides.info = null;
+
+  // 14. The commit badge.
+  //
+  // The point of it is to answer "is the deploy current?" by comparing two
+  // shas, so the branches that matter are the ones a real deployment produces:
+  // Vercel production, a Vercel preview, a local checkout, and — the case that
+  // is easy to get wrong — a deploy where the system environment variables are
+  // not exposed, which must say so rather than showing a stale or blank sha.
+  //
+  // /api/status is stubbed rather than restarted with VERCEL_* set, so every
+  // branch is reachable in one run.
+  const realStatus = await page.evaluate(async () => (await fetch('/api/status')).json());
+  const badge = () => page.evaluate(() => {
+    const n = document.querySelector('#commitBadge');
+    return {
+      text: n.textContent,
+      cls: n.className,
+      full: n.dataset.full || null,
+      title: n.title,
+      mono: getComputedStyle(n).fontFamily.includes('monospace'),
+      rightmost: document.querySelector('.topbar').lastElementChild === n,
+    };
+  });
+  const gotoStudio = async () => {
+    await page.goto(`${BASE}/?b=${++nonce}#studio`, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 900));
+  };
+
+  overrides.status = {
+    ...realStatus,
+    build: {
+      commit: '62de502', commit_full: '62de502c0aed246a9220dcccf528796c3f88ce5e',
+      commit_ref: 'main', commit_message: 'Refactor bake endpoint',
+      commit_dirty: false, commit_source: 'git',
+      deploy_env: null, deployment_id: null,
+    },
+  };
+  await gotoStudio();
+  const localClean = await badge();
+  check('commit: a clean local checkout shows its sha, unmarked',
+        localClean.text === '62de502' && localClean.mono && localClean.rightmost,
+        `${localClean.text} · ${localClean.cls}`);
+  check('commit: local is not dressed up as a deployment',
+        !/vercel/i.test(localClean.title) && /local/i.test(localClean.title),
+        localClean.title.split('\n')[0]);
+  check('commit: the badge copies the FULL sha, not the 7 shown',
+        localClean.full === '62de502c0aed246a9220dcccf528796c3f88ce5e',
+        localClean.full || 'no data-full');
+
+  overrides.status = {
+    ...realStatus,
+    build: { ...overrides.status.build, commit_dirty: true },
+  };
+  await gotoStudio();
+  const localDirty = await badge();
+  check('commit: uncommitted edits are marked, so a matching sha is not trusted',
+        localDirty.text === '62de502*' && /amber/.test(localDirty.cls) &&
+        /NOT what a deploy/i.test(localDirty.title),
+        `${localDirty.text} · ${localDirty.cls}`);
+
+  overrides.status = {
+    ...realStatus,
+    build: {
+      commit: 'fa1eade', commit_full: 'fa1eade47b73733d6312d5abfad33ce9e4068081',
+      commit_ref: 'main', commit_message: 'Update about page',
+      commit_dirty: false, commit_source: 'vercel',
+      deploy_env: 'production', deployment_id: 'dpl_7Gw5ZMBpQA8h9GF832KGp7nwbuh3',
+    },
+  };
+  await gotoStudio();
+  const prod = await badge();
+  check('commit: a Vercel production deploy is green and named',
+        prod.text === 'fa1eade' && /green/.test(prod.cls) &&
+        /Vercel · production/.test(prod.title),
+        `${prod.text} · ${prod.cls}`);
+  check('commit: the deployment id is on the tooltip',
+        /dpl_7Gw5ZMBpQA8h9GF832KGp7nwbuh3/.test(prod.title),
+        prod.title.split('\n').find(l => l.startsWith('deployment')) || 'missing');
+  check('commit: a deploy is never marked dirty (it is built from a commit)',
+        !/\*/.test(prod.text) && !/uncommitted/i.test(prod.title), prod.text);
+
+  overrides.status = {
+    ...realStatus,
+    build: { ...overrides.status.build, deploy_env: 'preview', deployment_id: null },
+  };
+  await gotoStudio();
+  const preview = await badge();
+  check('commit: a preview deploy is visually distinct from production',
+        preview.text === 'fa1eade' && /violet/.test(preview.cls) && /preview/.test(preview.title),
+        `${preview.text} · ${preview.cls}`);
+
+  // The failure that actually happens in the wild: a deploy whose project has
+  // "Enable access to System Environment Variables" unticked. VERCEL=1 is set,
+  // so it is hosted, but no sha is available. It must say so.
+  overrides.status = {
+    ...realStatus,
+    build: {
+      commit: null, commit_full: null, commit_ref: null, commit_message: null,
+      commit_dirty: false, commit_source: 'none',
+      deploy_env: null, deployment_id: null,
+    },
+  };
+  await gotoStudio();
+  const unknown = await badge();
+  check('commit: an unreadable commit says so instead of showing a blank or stale sha',
+        unknown.text === 'no commit' && unknown.full === null &&
+        /System Environment Variables/.test(unknown.title),
+        `${unknown.text} · ${unknown.title.slice(0, 60)}`);
+
+  // A failed /api/status must not leave the previous sha on screen: the whole
+  // value of the badge is telling two instances apart.
+  expectFailures = true;
+  overrides.status = { __fail: true };
+  await gotoStudio();
+  const offline = await badge();
+  check('commit: an unreachable server clears the badge rather than lying',
+        offline.text === 'no commit' && offline.full === null, offline.text);
+  expectFailures = false;
+
+  overrides.status = null;
   await page.setRequestInterception(false);
 
   console.log('\n===== CHECKS =====');

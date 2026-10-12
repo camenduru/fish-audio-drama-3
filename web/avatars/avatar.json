@@ -1,0 +1,105 @@
+{
+  "_comment": "Animated dialogue portraits (movement + lip-sync + blinking). Read by DialogueAvatar; nothing here is hard-coded in C++ (see DIALOGUE_AVATAR_LIPSYNC.md). Motion offsets are in reference pixels for a ~512 px avatar and divided by render.pixel_scale_divisor at draw time, so a larger divisor means calmer motion.",
+  "voice": {
+    "_comment": "RMS envelope + mouth gating. rms_ceiling is the raw RMS that maps to a fully open mouth (aituber-onair uses 0.12); envelope_hz is the precomputed envelope's resolution.",
+    "smooth_factor": 0.5,
+    "mouth_open_level": 0.125,
+    "mouth_half_level": 0.06,
+    "mouth_min_hold": 0.05,
+    "mouth_blend": 0.0,
+    "pause_gate_level": 0.03,
+    "rms_ceiling": 0.12,
+    "envelope_hz": 60.0
+  },
+  "blink": {
+    "_comment": "Blinks: per_min > 0 drives a Poisson interval (OpenFaceFX ~15/min) and snaps onto pauses; otherwise the uniform interval_* window is used. hold_* is how long the eyes stay shut.",
+    "per_min": 15.0,
+    "snap_window": 0.35,
+    "interval_min": 2.0,
+    "interval_max": 6.0,
+    "hold_min": 0.1,
+    "hold_max": 0.2
+  },
+  "visemes": {
+    "_comment": "Baked per-line mouth tracks (<wav>.visemes.json, baked by tools/gen_visemes.py). states maps the Hanna-Barbera letters A-H/X to the portrait's mouth shapes; a letter in none of the sets is closed. Missing/broken sidecar -> the loudness envelope is used instead.",
+    "enabled": true,
+    "use_atlas": true,
+    "fallback_to_energy": true,
+    "min_hold_seconds": 0.05,
+    "latency_seconds": 0.0,
+    "states": {
+      "closed": "AXF",
+      "half": "BEG",
+      "open": "CDH"
+    }
+  },
+  "idle": {
+    "_comment": "Ambient breathing/roll that runs under every animated style. freq is Hz. Small on purpose - even a couple of pixels reads large on a full-height portrait.",
+    "breath_amp": 0.7,
+    "breath_freq": 0.34,
+    "roll_amp": 0.0015,
+    "roll_freq": 0.64,
+    "sway_amp": 0.0,
+    "sway_freq": 0.23
+  },
+  "puppet": {
+    "_comment": "Gentle spring-wobble (the default). Keep this SUBTLE: phase_base/phase_voice set the bob speed (higher = nervous/fast), target_y_* set the height, max_rotation the tilt, energy_* how much voice drives it. Calmer = lower all of them. stiffness/damping only shape how it eases.",
+    "vertical_stiffness": 85.0,
+    "vertical_damping": 11.0,
+    "rotation_stiffness": 85.0,
+    "rotation_damping": 9.0,
+    "max_offset_y": 8.0,
+    "max_rotation": 0.015,
+    "energy_base": 0.2,
+    "energy_voice": 0.7,
+    "phase_base": 3.0,
+    "phase_voice": 1.6,
+    "sway_freq": 1.0,
+    "pulse_freq": 1.0,
+    "target_y_offset": 3.0,
+    "target_y_sway": 1.5,
+    "target_x_sway": 0.0,
+    "sway_x_freq": 0.7,
+    "squash": 0.0,
+    "squash_y_scale": 0.72
+  },
+  "bounce": {
+    "_comment": "Livelier jump/gravity motion (AvatarMotionStyle::Bounce). impulse_* are per loudness; gravity pulls the jump back down; impact_divisor turns landing speed into squash.",
+    "gravity": 1200.0,
+    "min_voice_level": 0.16,
+    "rising_edge": 0.025,
+    "min_impulse_interval": 0.09,
+    "forced_impulse_interval": 0.23,
+    "max_jump": -42.0,
+    "max_rotation": 0.13,
+    "impulse_velocity_base": 190.0,
+    "impulse_velocity_voice": 170.0,
+    "impulse_angle_base": 0.7,
+    "impulse_angle_voice": 0.8,
+    "squash_on_impulse": 0.35,
+    "impact_divisor": 520.0,
+    "rotation_spring": 42.0,
+    "rotation_damping": 7.5,
+    "squash_decay": 14.0,
+    "idle_rotation_decay": 5.0,
+    "airborne_stretch_divisor": 1200.0,
+    "airborne_stretch_min": -0.015,
+    "airborne_stretch_max": 0.025,
+    "squash_scale_x": 0.08,
+    "squash_scale_y": 0.1,
+    "stretch_scale_x": 0.35
+  },
+  "emphasis": {
+    "_comment": "Emphasis nods: a quick downward dip on a rising loudness edge (stressed syllable), then a spring return. impulse = dip strength, threshold/rising_edge gate when it fires, max clamps it.",
+    "threshold": 0.18,
+    "rising_edge": 0.06,
+    "impulse": 20.0,
+    "stiffness": 90.0,
+    "damping": 11.0,
+    "max": 3.0
+  },
+  "render": {
+    "_comment": "Reference-pixel offsets are multiplied by (portrait height / pixel_scale_divisor). Raise it for calmer motion, lower it for bigger motion.",
+    "pixel_scale_divisor": 900.0
+  }
+}

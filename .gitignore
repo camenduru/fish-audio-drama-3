@@ -34,3 +34,6 @@ desktop.ini
 *.swp
 *.swo
 *~
+# Workspace tooling marker (a project id, not app code). Untracked, so it would
+# otherwise leave the commit badge reading "dirty" forever.
+.freebuff/

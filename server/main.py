@@ -53,6 +53,75 @@ API_BASE = os.environ.get("FISH_API_BASE", "https://api.fish.audio")
 APP_VERSION = "1.0.0"
 
 
+def _git(*args: str) -> str | None:
+    """One field out of git, or None. Never raises — a deploy has no repo."""
+    try:
+        out = subprocess.run(["git", "-C", str(ROOT), *args],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def _build_info() -> dict[str, Any]:
+    """Which commit this instance is actually running.
+
+    The point of showing it is to answer "is the deploy current?": open the
+    deployed URL and localhost side by side and compare the two shas. Both are
+    therefore reported the same way, and `commit_source` says which one you are
+    looking at — a bare sha cannot tell you whether you are on Vercel or on your
+    own machine.
+
+    On Vercel the platform hands the deployed commit over in the environment.
+    `VERCEL_GIT_COMMIT_SHA` and friends are populated at runtime as well as at
+    build time, but ONLY when "Enable access to System Environment Variables" is
+    ticked in Project Settings — so their absence is reported as unknown rather
+    than guessed at. Locally there is no such thing and HEAD is read instead.
+
+    `commit_dirty` can only ever be true locally: a deploy is built from a
+    commit, so it can never carry uncommitted edits. That makes it the one case
+    where two matching shas still mean different code, which is exactly why the
+    badge marks it.
+
+    Resolved once, at import: the running code cannot change under a live
+    process, so re-shelling out to git on every /api/status would buy nothing.
+    """
+    sha = (os.environ.get("VERCEL_GIT_COMMIT_SHA") or "").strip()
+    if sha:
+        message = (os.environ.get("VERCEL_GIT_COMMIT_MESSAGE") or "").strip()
+        return {
+            "commit": sha[:7],
+            "commit_full": sha,
+            "commit_ref": (os.environ.get("VERCEL_GIT_COMMIT_REF") or "").strip() or None,
+            "commit_message": message.splitlines()[0] if message else None,
+            "commit_dirty": False,
+            "commit_source": "vercel",
+            "deploy_env": (os.environ.get("VERCEL_ENV") or "").strip() or None,
+            "deployment_id": (os.environ.get("VERCEL_DEPLOYMENT_ID") or "").strip() or None,
+        }
+
+    full = _git("rev-parse", "HEAD")
+    if not full:
+        return {
+            "commit": None, "commit_full": None, "commit_ref": None,
+            "commit_message": None, "commit_dirty": False,
+            "commit_source": "none", "deploy_env": None, "deployment_id": None,
+        }
+    return {
+        "commit": full[:7],
+        "commit_full": full,
+        "commit_ref": _git("rev-parse", "--abbrev-ref", "HEAD"),
+        "commit_message": _git("log", "-1", "--pretty=%s"),
+        "commit_dirty": bool(_git("status", "--porcelain")),
+        "commit_source": "git",
+        "deploy_env": None,
+        "deployment_id": None,
+    }
+
+
+BUILD_INFO = _build_info()
+
+
 def _writable_dir(candidates: list[Path]) -> tuple[Path, bool]:
     """The first candidate we can actually write to, and whether it is the
     project's own data/ rather than a rented temporary.
@@ -452,6 +521,9 @@ async def status() -> dict[str, Any]:
         "ok": True,
         "version": APP_VERSION,
         "api_base": API_BASE,
+        # Which commit this instance is running, so a deploy can be identified
+        # from the UI without opening the Vercel dashboard.
+        "build": BUILD_INFO,
         "key_configured": bool(key),
         "key_hint": (key[:10] + "..." + key[-4:]) if len(key) > 16 else ("set" if key else ""),
         # Where the key lives, so Setup can say "set FISH_API_KEY in your host's
@@ -721,6 +793,35 @@ DIALOGUE_ROOT = Path(os.environ.get(
     "ROGUELIKE_DIALOGUE_DIR", str(ROGUELIKE_ROOT / "assets" / "dialogue")))
 AVATAR_DIR = Path(os.environ.get(
     "ROGUELIKE_AVATAR_DIR", str(DIALOGUE_ROOT / "33")))
+
+# A copy of the default avatar ships with the studio, under web/ — which
+# vercel.json already includes in the function bundle.
+#
+# Without it a deploy had NO avatar art at all: the game folder does not exist
+# there, `discover_avatars()` returned nothing, and the Lip Sync page fell back
+# to the hard-coded /api/avatar/33/33_default*.png URLs, which 404'd. The canvas
+# stayed blank and the page looked broken for reasons nothing on screen named.
+#
+# The game folder still wins wherever it exists, so the local preview keeps
+# tracking the game's art rather than this snapshot of it.
+BUNDLED_AVATAR_ROOT = WEB_DIR / "avatars"
+
+
+def avatar_roots() -> list[Path]:
+    """Where avatar art is looked for, in priority order: the game, then here."""
+    return [DIALOGUE_ROOT, BUNDLED_AVATAR_ROOT]
+
+
+def _safe_avatar_path(root: Path, name: str) -> Path | None:
+    """`root/name`, or None when that path would escape `root`."""
+    base = root.resolve()
+    target = (base / name).resolve()
+    try:
+        target.relative_to(base)          # rejects ../ escapes
+    except ValueError:
+        return None
+    return target
+
 # The baker shells out to an interpreter that can import numpy + openfacefx.
 # Locally that is a system Python (the studio venv carries neither). A deployed
 # function has no such path, so it falls back to the interpreter this process is
@@ -745,40 +846,53 @@ VISEME_TIMEOUT = int(os.environ.get("VISEME_TIMEOUT", "240"))
 
 
 def discover_avatars() -> list[dict[str, Any]]:
-    """Every folder under assets/dialogue that carries a `<name>_face.json` atlas.
+    """Every folder under an avatar root that carries a `<name>_face.json` atlas.
 
     Adding an avatar is dropping a new folder into the game — no code change
     here. `<npc>/<npc>_default_face.json` + `<npc>_default_face.png` is the
     sheet, `<npc>_default.png` the portrait it gets pasted into.
+
+    Roots are searched in order and a folder is taken from the first root that
+    yields anything, so the game's own art always shadows the bundled copy of
+    the same npc instead of the two being listed twice.
     """
     out: list[dict[str, Any]] = []
-    if not DIALOGUE_ROOT.is_dir():
-        return out
-    for folder in sorted(DIALOGUE_ROOT.iterdir()):
-        if not folder.is_dir():
+    seen: set[str] = set()
+    for root in avatar_roots():
+        if not root.is_dir():
             continue
-        for face_json in sorted(folder.glob("*_face.json")):
-            stem = face_json.name[: -len(".json")]        # 33_default_face
-            sheet = face_json.with_suffix(".png")         # 33_default_face.png
-            if not sheet.exists():
+        for folder in sorted(root.iterdir()):
+            if not folder.is_dir() or folder.name in seen:
                 continue
-            prefix = stem[: -len("_face")] if stem.endswith("_face") else stem
-            portrait = folder / f"{prefix}.png"
-            try:
-                face = json.loads(face_json.read_text(encoding="utf-8"))
-            except Exception:
-                face = None
-            rel = f"{folder.name}/"
-            out.append({
-                "id": f"{folder.name}/{stem}",
-                "npc": folder.name,
-                "name": prefix,
-                "face": face,
-                "frames": len((face or {}).get("frames") or {}),
-                "face_json_url": f"/api/avatar/{rel}{face_json.name}",
-                "sheet_url": f"/api/avatar/{rel}{sheet.name}",
-                "portrait_url": f"/api/avatar/{rel}{portrait.name}" if portrait.exists() else None,
-            })
+            found = False
+            for face_json in sorted(folder.glob("*_face.json")):
+                stem = face_json.name[: -len(".json")]        # 33_default_face
+                sheet = face_json.with_suffix(".png")         # 33_default_face.png
+                if not sheet.exists():
+                    continue
+                prefix = stem[: -len("_face")] if stem.endswith("_face") else stem
+                portrait = folder / f"{prefix}.png"
+                try:
+                    face = json.loads(face_json.read_text(encoding="utf-8"))
+                except Exception:
+                    face = None
+                rel = f"{folder.name}/"
+                out.append({
+                    "id": f"{folder.name}/{stem}",
+                    "npc": folder.name,
+                    "name": prefix,
+                    "face": face,
+                    "frames": len((face or {}).get("frames") or {}),
+                    "face_json_url": f"/api/avatar/{rel}{face_json.name}",
+                    "sheet_url": f"/api/avatar/{rel}{sheet.name}",
+                    "portrait_url": f"/api/avatar/{rel}{portrait.name}" if portrait.exists() else None,
+                    # So the UI can say the preview is running off the bundled
+                    # copy rather than the game's — they can drift.
+                    "bundled": root is BUNDLED_AVATAR_ROOT,
+                })
+                found = True
+            if found:
+                seen.add(folder.name)
     return out
 
 
@@ -788,8 +902,34 @@ async def list_avatars() -> JSONResponse:
     return JSONResponse({
         "root": str(DIALOGUE_ROOT),
         "root_exists": DIALOGUE_ROOT.is_dir(),
+        # Where the bundled fallback lives, so a deploy can be told apart from a
+        # checkout that is simply missing its game folder.
+        "bundled_root": str(BUNDLED_AVATAR_ROOT),
+        "bundled_root_exists": BUNDLED_AVATAR_ROOT.is_dir(),
         "avatars": discover_avatars(),
     })
+
+
+def _avatar_settings() -> dict[str, Any]:
+    """The game's `avatar` block: blink schedule, mouth-hold, viseme mapping.
+
+    Read from the game's own game_settings.json locally. A deploy has no game
+    folder, so the same block ships as web/avatars/avatar.json — without it the
+    preview loses its blink timing and its mouth-hold, and stops matching the
+    game it exists to preview.
+    """
+    game = ROGUELIKE_ROOT / "assets" / "game_settings.json"
+    for path, nested in ((game, True), (BUNDLED_AVATAR_ROOT / "avatar.json", False)):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        block = data.get("avatar") if nested else data
+        if block:
+            return block
+    return {}
 
 
 @app.get("/api/lipsync/info")
@@ -803,24 +943,19 @@ async def lipsync_info() -> JSONResponse:
         default = avatars[0]
     face = (default or {}).get("face")
 
-    viseme_states = None
-    voice = None
-    blink = None
-    gs = ROGUELIKE_ROOT / "assets" / "game_settings.json"
-    if gs.exists():
-        try:
-            avatar = json.loads(gs.read_text(encoding="utf-8")).get("avatar") or {}
-            viseme_states = avatar.get("visemes")
-            voice = avatar.get("voice")
-            blink = avatar.get("blink")
-        except Exception:
-            viseme_states = None
-            voice = None
-            blink = None
+    settings = _avatar_settings()
+    viseme_states = settings.get("visemes")
+    voice = settings.get("voice")
+    blink = settings.get("blink")
+    from_game = DIALOGUE_ROOT.is_dir()
 
     return JSONResponse({
         "avatar_dir": str(AVATAR_DIR),
         "avatar_dir_exists": AVATAR_DIR.exists(),
+        # Which art the preview is actually drawn from. A deploy runs off the
+        # bundled copy, and the two can drift — so say which, rather than
+        # letting a stale bundle look like the game.
+        "avatar_source": "game" if from_game else ("bundled" if avatars else "none"),
         "face": face,
         "sheet_url": (default or {}).get("sheet_url", "/api/avatar/33/33_default_face.png"),
         "portrait_url": (default or {}).get("portrait_url", "/api/avatar/33/33_default.png"),
@@ -841,20 +976,29 @@ async def lipsync_info() -> JSONResponse:
 
 @app.get("/api/avatar/{name:path}")
 async def avatar_asset(name: str) -> Response:
-    """Serve the game's avatar art straight from the game folder, so the preview
-    always reflects the source of truth instead of a stale copy."""
-    base = DIALOGUE_ROOT.resolve()
-    target = (base / name).resolve()
-    try:
-        target.relative_to(base)          # rejects ../ escapes
-    except ValueError:
-        raise HTTPException(status_code=403, detail="outside the dialogue directory")
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail=f"no such avatar asset: {name}")
-    media = {".png": "image/png", ".json": "application/json",
-             ".jpg": "image/jpeg", ".webp": "image/webp"}.get(target.suffix.lower())
-    return Response(content=target.read_bytes(),
-                    media_type=media or "application/octet-stream")
+    """Serve avatar art — the game's own copy when it is there, the bundled one
+    otherwise.
+
+    The game folder is the source of truth locally, so it is tried first and the
+    preview keeps reflecting it. A deploy has no game folder, which is why this
+    used to 404 every /api/avatar/... and leave the Lip Sync canvas blank.
+    """
+    escaped = True
+    for root in avatar_roots():
+        target = _safe_avatar_path(root, name)
+        if target is None:
+            continue
+        escaped = False
+        if target.is_file():
+            media = {".png": "image/png", ".json": "application/json",
+                     ".jpg": "image/jpeg", ".webp": "image/webp"}.get(target.suffix.lower())
+            return Response(content=target.read_bytes(),
+                            media_type=media or "application/octet-stream")
+    # Only call it an escape attempt when every root rejected the path; a miss
+    # in one root is just a miss.
+    if escaped:
+        raise HTTPException(status_code=403, detail="outside the avatar directory")
+    raise HTTPException(status_code=404, detail=f"no such avatar asset: {name}")
 
 
 @app.post("/api/visemes")

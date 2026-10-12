@@ -37,6 +37,63 @@ function route(name) {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+/**
+ * The commit badge — the quickest way to tell whether a deploy is current.
+ *
+ * Open the deployed URL and localhost and compare the two shas: equal means
+ * Vercel is running your latest commit. Colour says which side you are looking
+ * at, because a sha on its own cannot tell you whether you are on Vercel or on
+ * your own machine — and a dirty local tree is the one case where matching
+ * shas still mean different code.
+ *
+ *   green  — Vercel, production
+ *   violet — Vercel, a preview/branch deployment
+ *   amber  — local with uncommitted changes (the sha does NOT describe this code)
+ *   grey   — local, clean
+ */
+function renderCommitBadge(b) {
+  const node = $('#commitBadge');
+  if (!node) return;
+
+  const sha = b?.commit;
+  if (!sha) {
+    node.textContent = 'no commit';
+    node.className = 'badge commit';
+    node.title = b?.commit_source === 'none'
+      ? 'This instance could not read a commit: there is no git repo here, and no ' +
+        'Vercel build metadata. On a deploy that usually means "Enable access to ' +
+        'System Environment Variables" is unticked in Project Settings.'
+      : 'Commit unknown.';
+    delete node.dataset.full;
+    return;
+  }
+
+  const hosted = b.commit_source === 'vercel';
+  const where = hosted
+    ? (b.deploy_env === 'production' ? 'Vercel · production'
+      : b.deploy_env ? `Vercel · ${b.deploy_env}` : 'Vercel')
+    : 'local (this machine)';
+
+  node.textContent = sha + (b.commit_dirty ? '*' : '');
+  node.className = 'badge commit ' + (hosted
+    ? (b.deploy_env === 'production' ? 'green' : 'violet')
+    : (b.commit_dirty ? 'amber' : ''));
+  node.title = [
+    `${where} — ${sha}`,
+    b.commit_ref ? `branch ${b.commit_ref}` : null,
+    b.commit_message || null,
+    b.deployment_id ? `deployment ${b.deployment_id}` : null,
+    '',
+    b.commit_dirty
+      ? 'The working tree has uncommitted edits, so this is NOT what a deploy of ' +
+        'this sha contains.'
+      : 'Compare with the other instance — equal shas mean the deploy is current.',
+    'Click to copy the full sha.',
+  ].filter(v => v !== null).join('\n');
+  node.dataset.full = b.commit_full || sha;
+}
+
 async function refreshStatus() {
   try {
     const s = await apiFetch('/api/status');
@@ -55,9 +112,14 @@ async function refreshStatus() {
           : 'No key configured.');
     // Only offered when this instance is actually behind the password gate.
     $('#lockRow').classList.toggle('hidden', !s.password_required);
+    renderCommitBadge(s.build);
   } catch (e) {
     $('#keyBadge').textContent = 'offline';
     $('#keyBadge').className = 'badge red';
+    // A failed /api/status means the badge cannot be trusted either — showing
+    // the previous sha would be worse than showing nothing, since the whole
+    // point is to tell two instances apart.
+    renderCommitBadge(null);
   }
 }
 
@@ -135,12 +197,26 @@ function initModal() {
   document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
 }
 
+// The full sha is what you paste into Vercel's deployment list, so make the
+// badge copy it rather than leaving you to retype seven characters.
+function initCommitBadge() {
+  const node = $('#commitBadge');
+  if (!node) return;
+  node.addEventListener('click', () => {
+    const full = node.dataset.full;
+    if (!full) { toast('No commit to copy on this instance.', 'err'); return; }
+    navigator.clipboard?.writeText(full);
+    toast(`Copied ${full}`);
+  });
+}
+
 // ---------------------------------------------------------------------------
 function boot() {
   $$('.rail-btn').forEach(b => b.addEventListener('click', () => route(b.dataset.view)));
   window.addEventListener('hashchange', () => route(location.hash.slice(1)));
   initModal();
   initSettings();
+  initCommitBadge();
 
   initStudio();
   initScenes();
