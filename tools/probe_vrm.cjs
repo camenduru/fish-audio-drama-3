@@ -444,6 +444,168 @@ const check = (name, ok, detail = '') => {
   check('auto-blink fires', await waitFor(n => window.__vrmcall().blinks > n, 45000, b0),
         `blinks ${b0} -> ${await page.evaluate(() => window.__vrmcall().blinks)}`);
 
+  // --- an agent's own body ---------------------------------------------------
+  // The Fish agent API has no avatar field, so the body is a URL kept in the
+  // agent's own `variables.defaults` on the server. That is the whole point: it
+  // travels with the agent, so every browser that selects it gets the same body.
+  // (A local `.vrm` used to be an option and could only ever be worn in the one
+  // browser that uploaded it, which is why it is gone.) This drives the real
+  // Config tab, then proves the body changes *because that agent is selected*,
+  // and puts the account back exactly as it was.
+  await load('agents');
+  const firstAgent = await page.evaluate(async () => {
+    try {
+      const d = await (await fetch('/api/fish/v1/agent/agents?page_size=5')).json();
+      return (d.agents || [])[0] || null;
+    } catch { return null; }
+  });
+  const openFirstAgent = async () => {
+    if (await page.$('#agPanel')) return true;
+    await page.evaluate(() => document.querySelector('#agList .tile')?.click());
+    return waitFor(() => !!document.querySelector('#agPanel'), 20000);
+  };
+
+  if (!firstAgent) {
+    check('agent VRM: skipped — this account has no agents to attach one to', true);
+  } else {
+    check('agent VRM: the Config tab offers the attachment', await openFirstAgent());
+
+    // The absent file picker is the change, not an omission: a body stored in
+    // one browser is not a body the agent has.
+    const fileInputs = await page.$$eval('#agPanel input[type=file]',
+      els => els.filter(i => (i.accept || '').includes('.vrm')).length);
+    check('agent VRM: the Config tab offers no per-browser file option, only a URL',
+          fileInputs === 0, `${fileInputs} .vrm file input(s)`);
+
+    // ---- the URL, stored on the server -------------------------------------
+    //
+    // The only place the studio writes to an agent's `variables` from a control
+    // that is not the variables editor — so the assertions below read the API,
+    // not the DOM. `{ fresh: true }` matters: the default read is cached, and
+    // the cache is exactly what the UI just wrote, so trusting it would prove
+    // nothing.
+    const vrmUrl = `${APP}/vrm/AvatarSample_B.vrm`;   // same origin, so no CORS to fight
+
+    // This agent is a real one on a real account and `vrm_url` is a real setting
+    // someone may have made. Snapshot it now: the test overwrites it, and the
+    // cleanup deletes it, so without this the probe would silently destroy the
+    // user's configuration and report success.
+    const originalVrmUrl = await page.evaluate(async id => {
+      const av = await import('/js/agentvars.js');
+      return av.getAgentVrmUrl(id);
+    }, firstAgent.agent_id);
+    console.log(`  (agent's own vrm_url before the test: ${originalVrmUrl ?? 'none'})`);
+    const readServerUrl = async () => page.evaluate(async id => {
+      const m = await import('/js/agentvars.js');
+      return m.getAgentVar(id, 'vrm_url', { fresh: true });
+    }, firstAgent.agent_id);
+
+    await load('agents');
+    await openFirstAgent();
+    const urlField = await page.$('#agVrmUrl');
+    check('agent VRM URL: the Config tab offers a Load-from-URL control',
+          !!(urlField && await page.$('#agVrmUrlUse')));
+
+    // The value is handed to `fetch()` later, so what it will accept is a real
+    // guard and not a formality: `javascript:` and `data:` are not models.
+    const accepts = await page.evaluate(async () => {
+      const m = await import('/js/agentvars.js');
+      const verdict = v => { try { return m.normalizeVrmUrl(v) ? 'accepted' : 'empty'; } catch { return 'rejected'; } };
+      return { js: verdict('javascript:alert(1)'), data: verdict('data:text/plain,hi'),
+               ftp: verdict('ftp://host/a.vrm'), ok: verdict('https://host/a.vrm'),
+               blank: verdict('   ') };
+    });
+    check('agent VRM URL: only http(s) is accepted',
+          accepts.js === 'rejected' && accepts.data === 'rejected' && accepts.ftp === 'rejected'
+          && accepts.ok === 'accepted' && accepts.blank === 'empty',
+          JSON.stringify(accepts));
+
+    await page.evaluate(([sel, v]) => { const i = document.querySelector(sel); if (i) i.value = v; },
+                        ['#agVrmUrl', vrmUrl]);
+    await page.click('#agVrmUrlUse');
+    const onServer = await waitFor(async ([id, want]) => {
+      const m = await import('/js/agentvars.js');
+      return (await m.getAgentVar(id, 'vrm_url', { fresh: true })) === want;
+    }, 20000, [firstAgent.agent_id, vrmUrl]);
+    check('agent VRM URL: the URL is stored on the agent, not in this browser',
+          onServer, await readServerUrl());
+
+    // The point of storing it: a page that has never seen this agent still gets
+    // the right body, because the URL comes back over the API.
+    await load('vrmcall');
+    const picked = await page.evaluate(id => {
+      const sel = document.querySelector('#vrmAgent');
+      if (!sel) return false;
+      sel.value = id; sel.dispatchEvent(new Event('change'));
+      return true;
+    }, firstAgent.agent_id);
+    const viaUrl = await waitFor(() => window.__vrmcall?.().model?.source === 'agent-url', 60000);
+    const urlMeta = await page.evaluate(() => window.__vrmcall().model);
+    check('agent VRM URL: the agent wears the model its URL points at',
+          picked && viaUrl && urlMeta.name === 'AvatarSample_B.vrm', JSON.stringify(urlMeta));
+
+    // Switching the agent away and back must re-read the URL rather than leave
+    // the previous agent's body on the stage — the dropdown is the only trigger
+    // a user has, and a stale body is indistinguishable from a wrong one.
+    await page.evaluate(() => {
+      const sel = document.querySelector('#vrmAgent');
+      if (!sel) return;
+      sel.value = ''; sel.dispatchEvent(new Event('change'));
+    });
+    await page.evaluate(id => {
+      const sel = document.querySelector('#vrmAgent');
+      if (!sel) return;
+      sel.value = id; sel.dispatchEvent(new Event('change'));
+    }, firstAgent.agent_id);
+    const reRead = await waitFor(() => window.__vrmcall?.().model?.source === 'agent-url', 60000);
+    check('agent VRM URL: re-selecting the agent re-loads its URL', reRead,
+          await page.evaluate(() => window.__vrmcall?.().model?.source));
+
+    // Cleanup: Remove has to actually clear the server key, or the body comes
+    // back on the next load and the button reads as broken. The probe must also
+    // leave the account exactly as it found it.
+    await load('agents');
+    await openFirstAgent();
+    await page.evaluate(() => {
+      const btn = [...document.querySelectorAll('#agPanel button')].find(b => /Remove VRM/.test(b.textContent));
+      btn?.click();
+    });
+    const cleared = await waitFor(async id => {
+      const av = await import('/js/agentvars.js');
+      return !(await av.getAgentVar(id, 'vrm_url', { fresh: true }));
+    }, 20000, firstAgent.agent_id);
+
+    // Force a fresh read rather than observing whatever the stage happened to
+    // still be showing. Switching away and back is the only trigger a user has,
+    // and it makes "the removal reached the page" a deterministic claim instead
+    // of one that can pass because nothing reloaded.
+    await load('vrmcall');
+    await page.evaluate(() => {
+      const sel = document.querySelector('#vrmAgent');
+      if (sel) { sel.value = ''; sel.dispatchEvent(new Event('change')); }
+    });
+    await page.evaluate(id => {
+      const sel = document.querySelector('#vrmAgent');
+      if (sel) { sel.value = id; sel.dispatchEvent(new Event('change')); }
+    }, firstAgent.agent_id);
+    const fellBack = await waitFor(() => window.__vrmcall?.().model?.source !== 'agent-url', 60000);
+    check('agent VRM: Remove clears the server URL and the page falls back',
+          cleared && fellBack, `cleared=${cleared} fellBack=${fellBack}`);
+
+    // Put back whatever was there. "Leave no trace" means restored, not emptied.
+    if (originalVrmUrl) {
+      await page.evaluate(async ([id, url]) => {
+        const av = await import('/js/agentvars.js');
+        await av.setAgentVrmUrl(id, url);
+      }, [firstAgent.agent_id, originalVrmUrl]);
+      const back = await waitFor(async ([id, want]) => {
+        const av = await import('/js/agentvars.js');
+        return (await av.getAgentVar(id, 'vrm_url', { fresh: true })) === want;
+      }, 20000, [firstAgent.agent_id, originalVrmUrl]);
+      check('agent VRM: the probe restored the agent’s own vrm_url', back, originalVrmUrl);
+    }
+  }
+
   // --- the Live Call page is untouched --------------------------------------
   check('Live Call still opens', await load('live'));
   check('live: agent dropdown present', (await page.$$eval('#liveAgent option', e => e.length)) >= 1);

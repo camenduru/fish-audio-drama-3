@@ -108,9 +108,18 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   check('library: sample play buttons present', playBtns > 0, playBtns + ' playable');
   const sampleTexts = await page.$$eval('#libGrid .sample-text', e => e.length);
   check('library: sample transcripts shown', sampleTexts > 0, sampleTexts + ' shown');
-  await page.evaluate(() => document.querySelector('#libGrid .play-btn').click());
+  // Target a tile that HAS a sample, and remember which one. A sampleless tile
+  // would now synthesize — that path costs credit and produces a blob, not the
+  // CDN request this check is about, so clicking "the first button" is no
+  // longer the same thing as clicking "a sample".
+  await page.evaluate(() => {
+    const btns = [...document.querySelectorAll('#libGrid .play-btn')];
+    const b = btns.find(x => x.title === 'Play sample') || btns[0];
+    b.dataset.probeTarget = '1';
+    b.click();
+  });
   await new Promise(r => setTimeout(r, 2500));
-  const playing = await page.$eval('#libGrid .play-btn', b => b.textContent.trim());
+  const playing = await page.$eval('#libGrid .play-btn[data-probe-target]', b => b.textContent.trim());
   check('library: sample audio starts playing', playing === '⏸', 'button → ' + playing);
   check('library: sample MP3 fetched from CDN', media.some(s => s === 200 || s === 206), media.length ? 'status ' + media.join(',') : 'no media request seen');
   await page.screenshot({ path: OUT + '/library.png' });
@@ -123,8 +132,229 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   const pickTiles = await page.$$eval('#modalBody .tile', e => e.length);
   const pickPlays = await page.$$eval('#modalBody .play-btn, #modalBody .btn.icon', e => e.length);
   check('picker: voices listed with play buttons', pickTiles > 0 && pickPlays > 0, `${pickTiles} voices, ${pickPlays} players`);
+
+  // The reported bug. A voice of yours has no `samples[]`, so its ▶ used to be
+  // rendered disabled and tooltipped "No sample" — inside the one list that
+  // exists to let you choose a voice, so the voice you most wanted to hear was
+  // the one you could not. It must now be live and wired to synthesis.
+  const pickOwn = await page.evaluate(async () => {
+    const own = await (await fetch('/api/fish/model?self=true&page_size=100')).json();
+    const id = (own.items?.[0] || {})._id;
+    if (!id) return { id: null };
+    const tile = [...document.querySelectorAll('#modalBody .tile')]
+      .find(t => t.querySelector('.badge.mt')?.textContent.trim() === id);
+    const btn = tile?.querySelector('.play-btn');
+    return { id, found: !!tile, disabled: !!btn?.disabled, title: btn?.title || '' };
+  });
+  check('picker: a voice of yours has a live ▶ that synthesizes (was a dead "No sample")',
+    !pickOwn.id || (pickOwn.found && !pickOwn.disabled && /synthesiz/i.test(pickOwn.title)),
+    pickOwn.id
+      ? `id ${pickOwn.id} — found=${pickOwn.found} disabled=${pickOwn.disabled} "${pickOwn.title.slice(0, 46)}"`
+      : 'this account has no voices of its own');
   await page.screenshot({ path: OUT + '/voice-picker.png' });
   await page.evaluate(() => document.querySelector('#modalClose').click());
+
+  // 8b3. My Voices — the account's own /model entries.
+  //
+  // This page renders tiles whether or not the `self=true` filter survives: drop
+  // the filter and it still shows 100 well-formed cards, just the public ones.
+  // So the check compares the ids on screen against the API's own `self=true`
+  // answer, and asserts no public-library id leaked in. `author_id=<you>` is not
+  // a substitute — it returns nothing — and the unfiltered listing does not
+  // contain a private upload at all, which is the gap this page exists to close.
+  await page.evaluate(() => document.querySelector('[data-view="myvoices"]').click());
+  await page.waitForFunction(() => document.querySelectorAll('#myVoiceGrid .tile, #myVoiceGrid .empty').length > 0,
+    { timeout: 20000 }).catch(() => {});
+  const mine = await page.evaluate(async () => {
+    const own = await (await fetch('/api/fish/model?self=true&page_size=100')).json();
+    const pub = await (await fetch('/api/fish/model?page_size=20&sort_by=task_count')).json();
+    const trunc = ids => ids.map(i => String(i).slice(0, 26));
+    return {
+      apiIds: trunc((own.items || []).map(m => m._id || m.id)),
+      pubIds: trunc((pub.items || []).map(m => m._id || m.id)),
+      shownIds: [...document.querySelectorAll('#myVoiceGrid .tile .hint.mono')].map(e => e.textContent.trim()),
+      titles: [...document.querySelectorAll('#myVoiceGrid .tile h4')].map(e => e.textContent),
+      badge: (document.querySelector('#myCount')?.textContent || '').trim(),
+      onView: document.querySelector('.rail-btn.active')?.dataset.view || '',
+      viewTitle: document.querySelector('#viewTitle')?.textContent || '',
+      playable: [...document.querySelectorAll('#myVoiceGrid .play-btn')].filter(b => !b.disabled).length,
+      synthTitles: [...document.querySelectorAll('#myVoiceGrid .play-btn')]
+        .filter(b => /synthesiz/i.test(b.title)).length,
+      empty: !(document.querySelector('#myVoiceEmpty')?.classList.contains('hidden') ?? true),
+    };
+  });
+  check('my voices: rail button routes to its own view',
+    mine.onView === 'myvoices' && mine.viewTitle === 'My Voices',
+    `${mine.onView} / "${mine.viewTitle}"`);
+  check('my voices: the page is the account\'s own models, not the public library',
+    mine.empty || (mine.shownIds.length === mine.apiIds.length
+      && mine.shownIds.every(id => mine.apiIds.includes(id))),
+    `${mine.shownIds.length} card(s) vs ${mine.apiIds.length} from self=true`);
+  check('my voices: no public-library voice leaked onto the page',
+    mine.empty || mine.shownIds.every(id => !mine.pubIds.includes(id)),
+    mine.empty ? 'account has no voices yet' : `vs ${mine.pubIds.length} public ids`);
+  check('my voices: count badge matches the listing',
+    mine.empty || mine.badge.startsWith(String(mine.apiIds.length)),
+    mine.badge || '(empty state)');
+  // A private voice has no `samples[]`, so a card that cannot be auditioned is
+  // the failure mode here — the ▶ must be live and wired to synthesis, not the
+  // permanently-disabled button the public library shows for a sampleless model.
+  check('my voices: every card has a live ▶ (synthesis), none disabled',
+    mine.empty || (mine.playable === mine.shownIds.length && mine.synthTitles === mine.playable),
+    mine.empty ? 'account has no voices yet' : `${mine.playable} live of ${mine.shownIds.length}, ${mine.synthTitles} synthesise`);
+
+  // Opt-in, because it spends API credit: press ▶ and prove the browser path
+  // really reaches the audio element. The default suite asserts the wiring only.
+  if (process.env.FISH_UI_LIVE_PREVIEW && !mine.empty) {
+    await page.evaluate(() => document.querySelector('#myVoiceGrid .play-btn').click());
+    const played = await page.waitForFunction(
+      () => document.querySelector('#myVoiceGrid .play-btn').textContent.trim() === '⏸',
+      { timeout: 90000 }).then(() => true).catch(() => false);
+    check('my voices: ▶ synthesizes and starts playing (live, costs credit)', played,
+      await page.$eval('#myVoiceGrid .play-btn', b => 'button → ' + b.textContent.trim()));
+  }
+
+  // The preview line. ▶ has to synthesize *something* for a voice with no
+  // sample, and a hardcoded sentence is what made every voice sound identical —
+  // "did you use generic audio?" was a fair reading of a branded constant. The
+  // setting must round-trip through storage and be what previewText() returns.
+  const lineCtl = await page.$('#myPreviewLine');
+  check('my voices: the preview line is editable', !!lineCtl);
+  if (lineCtl) {
+    const lineState = await page.evaluate(async () => {
+      const m = await import('/js/voicepreview.js');
+      const input = document.querySelector('#myPreviewLine');
+      const before = m.previewLine();
+
+      input.value = 'MARKER-preview-line';
+      input.dispatchEvent(new Event('change'));
+      const set = m.previewLine();
+      // Precedence, while the setting is live: a model with its own transcript
+      // speaks that; one without falls back to the setting.
+      const withText = m.previewText({ default_text: 'the model’s own transcript' });
+      const noTextSet = m.previewText({ default_text: '' });
+
+      input.value = '';
+      input.dispatchEvent(new Event('change'));
+      const cleared = m.previewLine();
+      const noTextCleared = m.previewText({ default_text: '' });
+
+      return { before, set, cleared, withText, noTextSet, noTextCleared,
+               stored: localStorage.getItem('fd3.previewLine') };
+    });
+    check('my voices: the preview line round-trips and can be cleared',
+      lineState.set === 'MARKER-preview-line' && lineState.cleared === lineState.before && lineState.stored === null,
+      `"${lineState.before}" → "${lineState.set}" → "${lineState.cleared}" (stored=${lineState.stored})`);
+    check('my voices: the transcript wins, the setting is the fallback, clearing restores the default',
+      lineState.withText === 'the model’s own transcript'
+      && lineState.noTextSet === 'MARKER-preview-line'
+      && lineState.noTextCleared === lineState.before,
+      `own="${lineState.withText}" · fallback="${lineState.noTextSet}" · cleared="${lineState.noTextCleared}"`);
+  }
+
+  // Clicking a card is the whole point of the page: its id lands in the studio.
+  if (!mine.empty) {
+    await page.evaluate(() => document.querySelector('#myVoiceGrid .tile').click());
+    const chosen = await page.$eval('#voiceId', e => e.value);
+    check('my voices: clicking a card loads its reference_id into the studio',
+      !!chosen && mine.apiIds.includes(String(chosen).slice(0, 26)), chosen);
+  }
+  await page.screenshot({ path: OUT + '/my-voices.png' });
+
+  // 8b4. The dedup branch, which this account's data cannot reach: the voice is
+  // private, so the public listing never contains it and `adopt()`'s filter would
+  // be invisible — a check that cannot fail is not a check. Inject the own voice
+  // into the public response instead: "a voice of yours that is also published"
+  // is exactly the case the filter exists for.
+  await page.evaluate(() => {
+    const orig = window.fetch;
+    window.__restoreFetch = () => { window.fetch = orig; };
+    window.fetch = async (url, opts) => {
+      const res = await orig(url, opts);
+      const u = typeof url === 'string' ? url : (url?.url || '');
+      if (u.includes('/api/fish/model') && !u.includes('self=true')) {
+        const pub = await res.clone().json();
+        const own = await orig('/api/fish/model?self=true&page_size=100').then(r => r.json());
+        pub.items = [...(pub.items || []), ...(own.items || [])];
+        return new Response(JSON.stringify(pub), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return res;
+    };
+  });
+  await page.evaluate(() => document.querySelector('[data-view="studio"]').click());
+  await page.click('#pickVoice');
+  await page.waitForFunction(() => document.querySelectorAll('#modalBody .tile').length > 0,
+    { timeout: 20000 }).catch(() => {});
+  const dup = await page.evaluate(async () => {
+    const own = await (await fetch('/api/fish/model?self=true&page_size=100')).json();
+    const id = (own.items?.[0] || {})._id;
+    const grids = [...document.querySelectorAll('#modalBody .grid')];
+    const hits = g => g ? [...g.querySelectorAll('.tile .badge.mt')].filter(e => e.textContent.trim() === id).length : 0;
+    return {
+      id,
+      total: [...document.querySelectorAll('#modalBody .tile .badge.mt')].filter(e => e.textContent.trim() === id).length,
+      first: hits(grids[0]), second: hits(grids[1]),
+    };
+  });
+  check('picker: a voice that is both yours and public is listed once, under My Voices',
+    !!dup.id && dup.total === 1 && dup.first === 1 && dup.second === 0,
+    `id ${dup.id} → ${dup.total} card(s) (My Voices ${dup.first}, library ${dup.second})`);
+  await page.evaluate(() => { document.querySelector('#modalClose').click(); window.__restoreFetch(); });
+
+  // 8b5. The empty state and its example voices. This account HAS a voice, so the
+  // empty path never runs on its own — stub `self=true` to answer with nothing,
+  // which is the only way to see it. (A check that never renders is not a check.)
+  await page.evaluate(() => document.querySelector('[data-view="myvoices"]').click());
+  await page.evaluate(() => {
+    const orig = window.fetch;
+    window.__restoreFetch2 = () => { window.fetch = orig; };
+    window.fetch = (url, opts) => {
+      const u = typeof url === 'string' ? url : (url?.url || '');
+      if (u.includes('/api/fish/model') && u.includes('self=true')) {
+        return Promise.resolve(new Response(JSON.stringify({ items: [] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      return orig(url, opts);
+    };
+  });
+  await page.evaluate(() => document.querySelector('#myRefresh').click());
+  await page.waitForFunction(() => document.querySelectorAll('#myVoiceEmpty .tile').length > 0,
+    { timeout: 20000 }).catch(() => {});
+  const blank = await page.evaluate(() => ({
+    shown: !document.querySelector('#myVoiceEmpty').classList.contains('hidden'),
+    ownTiles: document.querySelectorAll('#myVoiceGrid .tile').length,
+    message: (document.querySelector('#myVoiceEmpty .empty')?.textContent || '').trim().slice(0, 48),
+    heads: [...document.querySelectorAll('#myVoiceEmpty b')].map(b => b.textContent.trim()),
+    ids: [...document.querySelectorAll('#myVoiceEmpty .tile .hint.mono')].map(e => e.textContent.trim()),
+    playable: [...document.querySelectorAll('#myVoiceEmpty .play-btn')].filter(b => !b.disabled).length,
+    synth: [...document.querySelectorAll('#myVoiceEmpty .play-btn')].filter(b => /synthesiz/i.test(b.title)).length,
+    badge: (document.querySelector('#myCount')?.textContent || '').trim(),
+  }));
+  check('my voices: with nothing of its own the page shows the empty state',
+    blank.shown && blank.ownTiles === 0, `"${blank.message}" · badge "${blank.badge}"`);
+  check('my voices: the empty state offers example voices from the public library',
+    blank.ids.length > 0 && blank.heads.some(h => /Example voices/.test(h))
+      && blank.ids.every(id => !mine.apiIds.includes(id)),
+    `${blank.ids.length} example(s) — ${blank.heads.join(' / ')}`);
+  // The examples come from the public library, so they must play a real sample.
+  // `synth === 0` is what makes that a claim rather than a coincidence: a
+  // sampleless example would now be enabled too, just by the paid path.
+  check('my voices: every example voice plays a real sample (not a paid synthesis)',
+    blank.playable === blank.ids.length && blank.playable > 0 && blank.synth === 0,
+    `${blank.playable}/${blank.ids.length} playable, ${blank.synth} synthesise`);
+
+  // …and the contract in the other direction: examples are for an empty shelf
+  // only. The stubbed fetch is removed, so this is the real account again.
+  await page.evaluate(() => { window.__restoreFetch2(); document.querySelector('#myRefresh').click(); });
+  await page.waitForFunction(() => document.querySelectorAll('#myVoiceGrid .tile').length > 0,
+    { timeout: 20000 }).catch(() => {});
+  const stocked = await page.evaluate(() => ({
+    hidden: document.querySelector('#myVoiceEmpty').classList.contains('hidden'),
+    leftover: document.querySelectorAll('#myVoiceEmpty .tile').length,
+  }));
+  check('my voices: the examples vanish once the account has a voice of its own',
+    stocked.hidden && stocked.leftover === 0,
+    `hidden=${stocked.hidden} leftover=${stocked.leftover}`);
 
   // 8c. Examples library
   await page.evaluate(() => document.querySelector('[data-view="examples"]').click());
@@ -242,12 +472,118 @@ const OUT = 'C:/Users/PC/AppData/Local/Temp/shots';
   check('agents: list rendered (empty workspace ok)', agText.length > 0 && !agText.includes('Could not load'), agText.trim().slice(0, 60));
   await page.screenshot({ path: OUT + '/agents.png' });
 
-  // 10. New agent modal
+  // 10. New agent modal — and the voice picker reached from inside it.
   await page.click('#agNew');
   await new Promise(r => setTimeout(r, 300));
   check('agents: create modal opens', await page.$('#modalBack.open') !== null);
+  check('agents: the create form has a 🔍 for the voice id',
+    await page.$('#agNewVoicePick') !== null);
+  // The create form offers a VRM *URL* and deliberately not a file picker: the
+  // agent's body has to live on the server to travel with the agent, and a file
+  // chosen here could only ever be worn in this browser. Both halves are
+  // asserted — a control that exists and a file input that must not.
+  const newVrm = await page.evaluate(() => {
+    const file = [...document.querySelectorAll('#modalBody input[type=file]')]
+      .find(i => (i.accept || '').includes('.vrm'));
+    return {
+      url: !!document.querySelector('#modalBody #agVrmUrl'),
+      use: !!document.querySelector('#modalBody #agVrmUrlUse'),
+      file: !!file,
+      text: (document.querySelector('#modalBody')?.textContent || '').includes('VRM'),
+    };
+  });
+  check('agents: the create form offers an optional VRM URL, and no file picker',
+    newVrm.url && newVrm.use && newVrm.text && !newVrm.file,
+    `url=${newVrm.url} use=${newVrm.use} file=${newVrm.file}`);
   await page.screenshot({ path: OUT + '/agent-modal.png' });
+
+  // Mark two fields first. The picker and the create form are both panels of the
+  // same #modalBody, so a picker that does not stack its caller *replaces* the
+  // form — and the checks below would then find no #agNewVoice at all, or a
+  // rebuilt form with an empty Name.
+  await page.evaluate(() => {
+    document.querySelector('#agNewVoice').value = 'MARKER-not-a-real-id';
+    document.querySelector('#modalBody input[placeholder="Support agent"]').value = 'MARKER-agent-name';
+  });
+  await page.click('#agNewVoicePick');
+  await page.waitForFunction(() => document.querySelectorAll('#modalBody .tile').length > 0,
+    { timeout: 20000 }).catch(() => {});
+  const pick = await page.evaluate(async () => {
+    const own = await (await fetch('/api/fish/model?self=true&page_size=100')).json();
+    const idsOf = g => g ? [...g.querySelectorAll('.tile .badge.mt')].map(e => e.textContent.trim()) : [];
+    const grids = [...document.querySelectorAll('#modalBody .grid')];
+    return {
+      ownIds: (own.items || []).map(m => m._id || m.id),
+      heads: [...document.querySelectorAll('#modalBody b')].map(b => b.textContent.trim()),
+      first: idsOf(grids[0]),
+      second: idsOf(grids[1]),
+      count: (document.querySelector('#modalBody .flex .hint')?.textContent || '').trim(),
+    };
+  });
+  check('picker: My Voices is the first group, and it is the account\'s own',
+    pick.ownIds.length > 0
+      ? pick.heads[0] === '🎙 My Voices' && pick.first.length === pick.ownIds.length
+        && pick.first.every(id => pick.ownIds.includes(id))
+      : pick.heads[0] !== '🎙 My Voices',
+    pick.ownIds.length
+      ? `heads ${JSON.stringify(pick.heads)} · ${pick.first.length}/${pick.ownIds.length} own ids first`
+      : `account has no own voices, so no group — heads ${JSON.stringify(pick.heads)}`);
+  check('picker: own voices are never repeated in the public group below',
+    pick.heads[1] === '🌐 Voice library' && pick.second.length > 0
+      && pick.second.every(id => !pick.ownIds.includes(id)),
+    `${pick.second.length} public after ${pick.first.length} own · count "${pick.count}"`);
+
+  await page.evaluate(() => document.querySelector('#modalBody .tile').click());
+  await new Promise(r => setTimeout(r, 250));
+  const back = await page.evaluate(() => ({
+    open: !!document.querySelector('#modalBack.open'),
+    title: (document.querySelector('#modalTitle')?.textContent || ''),
+    voice: document.querySelector('#agNewVoice')?.value ?? null,
+    name: document.querySelector('#modalBody input[placeholder="Support agent"]')?.value ?? null,
+  }));
+  check('picker: picking from the create form restores the form, not an empty modal',
+    back.open && /New agent/.test(back.title) && back.voice !== null,
+    `open=${back.open} title="${back.title}" voice=${back.voice}`);
+  check('picker: the fields typed before the picker opened survived the round trip',
+    back.name === 'MARKER-agent-name' && back.voice !== 'MARKER-not-a-real-id',
+    `name=${back.name} voice=${back.voice}`);
+  check('picker: the picked voice id lands in the create form',
+    // The first tile is the first My Voices card when the account has any, so
+    // the field has to hold exactly that id — not merely "some hex id", which a
+    // click that landed on the public grid would also satisfy.
+    pick.first.length ? back.voice === pick.first[0] : /^[0-9a-f]{32}$/.test(back.voice || ''),
+    back.voice);
   await page.evaluate(() => document.querySelector('#modalClose').click());
+  await new Promise(r => setTimeout(r, 200));
+  check('modal: closing the last panel really closes the overlay',
+    await page.$('#modalBack.open') === null);
+
+  // 10b. The same attachment on the agent's Config tab. Without it an agent
+  // created with no VRM could never get one — which is why it is not create-only.
+  const agentCount = await page.$$eval('#agList .tile', e => e.length);
+  let cfgVrm = null;
+  if (agentCount) {
+    await page.evaluate(() => document.querySelector('#agList .tile').click());
+    await page.waitForFunction(() => document.querySelectorAll('#agPanel .card').length > 0,
+      { timeout: 20000 }).catch(() => {});
+    cfgVrm = await page.evaluate(() => {
+      const card = [...document.querySelectorAll('#agPanel .card')]
+        .find(c => /Avatar \(VRM\)/.test(c.querySelector('.card-h')?.textContent || ''));
+      const file = card?.querySelector('input[type=file]');
+      return {
+        section: !!card,
+        url: !!card?.querySelector('#agVrmUrl'),
+        file: !!file && (file.accept || '').includes('.vrm'),
+        status: (card?.querySelector('#agVrmStatus')?.textContent || '').slice(0, 70),
+      };
+    });
+    check('agents: the Config tab can set a VRM URL on an existing agent (no file picker)',
+      cfgVrm.section && cfgVrm.url && !cfgVrm.file,
+      `status: "${cfgVrm.status}"`);
+  } else {
+    check('agents: the Config tab can attach a VRM to an existing agent', true,
+      'no agents on this account — not exercised');
+  }
 
   // 11. Live call view
   await page.evaluate(() => document.querySelector('[data-view="live"]').click());

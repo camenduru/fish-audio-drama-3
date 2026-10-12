@@ -1,7 +1,7 @@
 // voices.js — Voice Design (generate voices from a prompt) + the voice library
 
-import { $, el, toast, modal, close, apiFetch, fish, b64ToBlob, downloadBlob, debounce } from './api.js';
-import * as A from './audio.js';
+import { $, el, esc, toast, modal, close, apiFetch, fish, b64ToBlob, downloadBlob, debounce, fmtTime } from './api.js';
+import { attachVoicePreview, previewLine, setPreviewLine } from './voicepreview.js';
 import { setVoice } from './studio.js';
 
 const VD_EXAMPLES = [
@@ -91,6 +91,9 @@ function openSaveVoice(blob, cand, instruction) {
       const model = await fish.post('model', fd);
       toast('Saved. Model id: ' + (model._id || model.id), 'ok');
       close();
+      // A saved design is a new private /model entry: it belongs on My Voices
+      // the moment it exists, not after the next reload.
+      loadMyVoices();
     } catch (e) { toast('Save failed: ' + e.message, 'err'); }
     finally { save.disabled = false; save.textContent = 'Save voice'; }
   } }, 'Save voice');
@@ -127,29 +130,39 @@ async function loadLibrary(search = '') {
     const data = await fish.get('model', q);
     libCache = data.items || data.models || [];
     if (!libCache.length) { grid.innerHTML = '<div class="empty"><div class="big">🎙</div>No voices found. Upload a reference clip to create one.</div>'; return; }
-    grid.replaceChildren(...libCache.map(voiceTile));
+    grid.replaceChildren(...libCache.map(m => voiceTile(m)));
   } catch (e) {
     grid.innerHTML = `<div class="empty">Could not load library: ${e.message}</div>`;
   }
 }
 
-/** One voice card, with a real playable sample from the model's `samples[]`. */
-function voiceTile(m) {
+/**
+ * One voice card, with a real playable sample from the model's `samples[]`.
+ *
+ * `opts.mine` marks a card on the My Voices page — it controls the badges, the
+ * ⧉ Copy id button and which box the selection is echoed into. It is NOT what
+ * decides whether ▶ works: Fish only generates `samples[]` for published
+ * voices, so an uploaded one has none, and `attachVoicePreview` synthesizes a
+ * line for any voice in that state. That helper is shared with the Voice
+ * library and every picker, so a voice you made is auditionable in all of them
+ * rather than only here.
+ */
+function voiceTile(m, opts = {}) {
   const id = m._id || m.id;
+  const mine = !!opts.mine;
   const sample = (m.samples || [])[0];
-  const key = 'voice:' + id;
+  const key = (mine ? 'myvoice:' : 'voice:') + id;
   const btn = el('button.btn.sm.icon.play-btn', { title: 'Play sample' }, '▶');
-  if (!sample?.audio) { btn.disabled = true; btn.title = 'No sample for this voice'; }
-  btn.addEventListener('click', e => {
-    e.stopPropagation();
-    A.playPreview(sample.audio, key, playing => { btn.textContent = playing ? '⏸' : '▶'; });
-  });
+  // Shared with the Voice library and every picker, so a voice you uploaded is
+  // auditionable everywhere rather than only on this page — see voicepreview.js.
+  attachVoicePreview(btn, m, key);
 
   const langs = (m.languages || []).slice(0, 3);
   return el('div.tile.voice-tile', {
     onclick: () => {
       setVoice(id, m.title);
-      $('#libSelected').textContent = `${m.title || id} → ${id}`;
+      const box = $(opts.selected || (mine ? '#mySelected' : '#libSelected'));
+      if (box) box.textContent = `${m.title || id} → ${id}`;
       toast('Loaded into studio: ' + (m.title || id), 'ok');
     },
   }, [
@@ -164,9 +177,29 @@ function voiceTile(m) {
       ...langs.map(l => el('span.badge', {}, l)),
       m.visibility ? el('span.badge.violet', {}, m.visibility) : null,
       m.task_count ? el('span.badge', {}, (m.task_count / 1000).toFixed(0) + 'k uses') : null,
+      mine ? stateBadge(m) : null,
+      mine && m.created_at ? el('span.badge', {}, fmtTime(m.created_at)) : null,
     ]),
+    mine ? el('div.flex.gap', { style: 'margin-top:8px;flex-wrap:wrap' }, [
+      el('button.btn.sm', { title: 'Copy this reference_id', onclick: e => { e.stopPropagation(); copyId(id); } }, '⧉ Copy id'),
+    ]) : null,
     el('div.hint.mono', { style: 'margin-top:8px;font-size:10.5px' }, id.slice(0, 26)),
   ]);
+}
+
+/** `state` is Fish's own word for a model: trained / training / failed. */
+function stateBadge(m) {
+  const s = String(m.state || '').toLowerCase();
+  if (!s) return null;
+  const cls = s === 'trained' ? 'green' : (s === 'failed' ? 'red' : 'amber');
+  return el(`span.badge.${cls}`, {}, s);
+}
+
+function copyId(id) {
+  const done = () => toast('reference_id copied: ' + id, 'ok');
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(id).then(done, () => toast('Copy failed — id is ' + id, 'err'));
+  } else { toast('reference_id: ' + id, ''); }
 }
 
 function openUploadVoice() {
@@ -187,7 +220,7 @@ function openUploadVoice() {
       if (text.value) fd.append('texts', text.value);
       const m = await fish.post('model', fd);
       toast('Voice created: ' + (m._id || m.id), 'ok');
-      close(); loadLibrary();
+      close(); loadLibrary(); loadMyVoices();
     } catch (e) { toast('Upload failed: ' + e.message, 'err'); }
     finally { up.disabled = false; up.textContent = 'Create voice'; }
   } }, 'Create voice');
@@ -203,6 +236,106 @@ function openUploadVoice() {
     ]),
     footer: [el('button.btn', { onclick: close }, 'Cancel'), up],
   });
+}
+
+// ---------------------------------------------------------------------------
+// My Voices — the account's own /model entries
+//
+// `self=true` is the only filter that returns your own models. `author_id=<you>`
+// returns nothing, and the unfiltered listing is the public library, which does
+// not contain your private uploads at all — so an uploaded voice used to be
+// created and then visible nowhere in the app.
+// ---------------------------------------------------------------------------
+let myCache = [];
+
+/**
+ * The empty state — with example voices, because "you have no voices yet" on its
+ * own teaches nothing about what a voice is for.
+ *
+ * The examples come from the public library and keep their real `samples[]`, so
+ * ▶ plays a real recording of the voice rather than spending credit. They are
+ * rendered outside `#myVoiceGrid` on purpose: that grid means "voices you made".
+ * They disappear the moment the account has a voice of its own, and a search that
+ * matched nothing gets the message only — a failed search is not an invitation to
+ * go browsing.
+ */
+async function renderMyVoiceExamples(search) {
+  const box = $('#myVoiceEmpty');
+  box.classList.remove('hidden');
+  box.replaceChildren(el('div.empty', {}, [
+    el('div.big', {}, '🎙'),
+    el('div', {}, search
+      ? `Nothing of yours matches “${esc(search)}”.`
+      : 'No voices yet. Use ⬆ Upload reference clip to clone one from 10–30s of speech, or save a candidate from the Voice Design page.'),
+  ]));
+  if (search) return;
+  try {
+    const data = await fish.get('model', { page_size: 6, sort_by: 'task_count' });
+    const items = (data.items || data.models || []).slice(0, 6);
+    if (!items.length) return;
+    const grid = el('div.grid.c3');
+    for (const m of items) grid.append(voiceTile(m, { selected: '#mySelected' }));
+    box.append(
+      el('div.flex.aic.gap', { style: 'gap:8px;margin:24px 0 10px;justify-content:center;flex-wrap:wrap' }, [
+        el('b', { style: 'font-size:12.5px;letter-spacing:.02em' }, '🎧 Example voices'),
+        el('span.hint', {}, 'from the public library — ▶ to hear one, click to load it into the studio'),
+      ]),
+      grid,
+    );
+  } catch { /* the examples are a nicety; the empty state stands without them */ }
+}
+
+async function loadMyVoices(search = '') {
+  const grid = $('#myVoiceGrid');
+  const empty = $('#myVoiceEmpty');
+  // Cleared up front, so a reload cannot show the previous answer's examples
+  // underneath a "Loading…" line.
+  empty.classList.add('hidden');
+  grid.replaceChildren(el('div.hint', {}, 'Loading…'));
+  try {
+    const q = { self: 'true', page_size: 100 };
+    if (search) q.title = search;
+    const data = await fish.get('model', q);
+    // Newest first: the voice you just created is the one you are looking for,
+    // and the API's own ordering is not guaranteed to be by date.
+    myCache = (data.items || data.models || []).slice()
+      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    $('#myCount').textContent = myCache.length ? `${myCache.length} voice${myCache.length === 1 ? '' : 's'}` : 'none yet';
+    if (!myCache.length) {
+      grid.replaceChildren();
+      await renderMyVoiceExamples(search);
+      return;
+    }
+    // Cleared as well as hidden: stale example tiles left in the DOM are how a
+    // probe ends up asserting on cards that are not on screen.
+    empty.replaceChildren();
+    empty.classList.add('hidden');
+    grid.replaceChildren(...myCache.map(m => voiceTile(m, { mine: true })));
+  } catch (e) {
+    $('#myCount').textContent = '';
+    empty.classList.add('hidden');
+    grid.innerHTML = `<div class="empty">Could not load your voices: ${esc(e.message)}</div>`;
+  }
+}
+
+export function initMyVoices() {
+  $('#myRefresh').addEventListener('click', () => loadMyVoices($('#mySearch').value.trim()));
+  $('#mySearch').addEventListener('input', debounce(e => loadMyVoices(e.target.value.trim()), 450));
+  $('#myUpload').addEventListener('click', openUploadVoice);
+
+  // The sentence ▶ synthesizes. One setting for the whole app, so it lives here
+  // (the page that is about your own voices) and applies to every picker too.
+  const line = $('#myPreviewLine');
+  if (line) {
+    line.value = previewLine();
+    line.addEventListener('change', () => {
+      const saved = setPreviewLine(line.value);
+      line.value = saved;                      // echoes the default back when cleared
+      toast('Preview line saved — ▶ will say that.', 'ok');
+    });
+  }
+
+  loadMyVoices();
 }
 
 export function initVoices() {

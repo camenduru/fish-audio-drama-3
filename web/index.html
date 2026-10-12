@@ -47,6 +47,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
       Voices
     </button>
+    <button class="rail-btn" data-view="myvoices">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-6-4.2L6 21V3z"/><path d="M9.5 8.5h5" stroke-width="1.6"/></svg>
+      My Voices
+    </button>
     <button class="rail-btn" data-view="examples">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8 5.8 21.3l2.4-7.4L2 9.4h7.6z"/><path d="M4 21h16" stroke-width="1.6"/></svg>
       Examples
@@ -294,6 +298,52 @@
           </div></details>
           <details class="side-section" open><summary>📖 About the library</summary><div class="side-body">
             <div class="hint">Voices are Fish Audio <span class="mono">/model</span> entries. Upload a 10–30s clip with a clean transcript to clone a voice; the model id it returns works as a <span class="mono">reference_id</span> everywhere.</div>
+          </div></details>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ---------- MY VOICES ---------- -->
+    <!--
+      Every voice this account has created, and only those. The public library
+      (/model with no filter) does not contain your own private uploads, so a
+      freshly created voice was reachable nowhere in the app; this page queries
+      /model?self=true, which is the account's own shelf.
+    -->
+    <section class="view" id="view-myvoices">
+      <div class="studio">
+        <div class="studio-main">
+          <div class="pad flex aic gap" style="border-bottom:1px solid var(--line)">
+            <input class="input" id="mySearch" placeholder="Search my voices…" style="max-width:340px">
+            <button class="btn" id="myRefresh">Refresh</button>
+            <div class="grow"></div>
+            <span class="badge" id="myCount">…</span>
+            <button class="btn" id="myUpload">⬆ Upload reference clip</button>
+          </div>
+          <div class="scroll grow pad">
+            <!-- The empty state is a sibling of the grid, not a cell in it: the
+                 example voices it offers are public library models, and a probe
+                 (or a person) reading #myVoiceGrid must never see them as yours. -->
+            <div id="myVoiceEmpty" class="hidden"></div>
+            <div class="grid c3" id="myVoiceGrid"></div>
+          </div>
+        </div>
+        <aside class="studio-side">
+          <details class="side-section" open><summary>🔗 Use in studio</summary><div class="side-body">
+            <div class="hint mb">Click a voice to load its <span class="mono">reference_id</span> into the Drama 3 studio.</div>
+            <div id="mySelected" class="hint">None selected.</div>
+          </div></details>
+          <details class="side-section" open><summary>🔊 Preview line</summary><div class="side-body">
+            <!-- Fish keeps no sample for a voice you uploaded, so ▶ synthesizes
+                 one. This is the sentence it speaks — without it every voice
+                 would be auditioned with the same canned line, which reads as
+                 "generic audio" and hides what the clone actually sounds like. -->
+            <div class="hint mb">▶ synthesizes a line with the voice, because Fish keeps no sample for an uploaded one. This is the sentence it says.</div>
+            <input class="input" id="myPreviewLine" placeholder="The quick brown fox jumps over the lazy dog.">
+            <div class="hint" style="margin-top:6px">Saved in this browser and used by every ▶ in the app — the pickers and the Voice library too. A voice with its own transcript still speaks that instead.</div>
+          </div></details>
+          <details class="side-section" open><summary>📖 About My Voices</summary><div class="side-body">
+            <div class="hint">Voices you create — an uploaded reference clip or a saved design — are private <span class="mono">/model</span> entries on your Fish account. The public library lists other people's published voices and never shows your own, which is why they get their own page. Every id here works as a <span class="mono">reference_id</span> anywhere in the studio.</div>
           </div></details>
         </aside>
       </div>

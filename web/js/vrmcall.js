@@ -48,6 +48,9 @@
 
 import { $, el, toast } from './api.js';
 import { createAgentCall } from './agentcall.js';
+// A model attached to an agent, so the body can belong to the agent rather than
+// to "whatever I picked last".
+import { getAgentVrmUrl, onAgentVarsChange } from './agentvars.js';
 // The expression side — lip sync, emotions, blinking — ported from ChatVRM's
 // src/features as one unit. See emote.js for what each piece corresponds to.
 import { EmoteController, attachLookAt } from './emote.js';
@@ -182,6 +185,18 @@ let emote = null;           // EmoteController for the current model (mouth, bli
 let frames = 0;
 let lastError = null;
 let modelMeta = null;       // { name, size, version, expressions, bones, source }
+
+// `source` is an internal name; this is what the HUD shows. 'agent-url' is
+// spelled out because "where did this body come from" is exactly the question
+// the label exists to answer, and the two agent sources are not interchangeable.
+const SOURCE_LABELS = {
+  default: 'bundled',
+  restore: 'your last model',
+  file: 'file',
+  agent: 'agent’s own file',
+  'agent-url': 'agent’s own URL',
+  url: 'URL',
+};
 let squaredBy = null;       // largest yaw correction applied to this model, in degrees
 let framedTarget = null;    // where the camera looked when the model was framed
 let panTmp = null;          // one reusable vector for the pan clamp
@@ -673,7 +688,7 @@ function reportModel() {
       el('div.kv', {}, [el('span.k', {}, 'Idle clip'), el('span.v', { style: 'font-size:11.5px' }, idleMeta
         ? `${idleMeta.name} · ${idleMeta.duration}s · ${idleMeta.tracks} tracks`
         : (idleError ? 'unavailable — procedural sway' : '—'))]),
-      el('div.kv', {}, [el('span.k', {}, 'Source'), el('span.v', {}, modelMeta?.source === 'default' ? 'bundled' : (modelMeta?.source || '—'))]),
+      el('div.kv', {}, [el('span.k', {}, 'Source'), el('span.v', {}, SOURCE_LABELS[modelMeta?.source] || modelMeta?.source || '—')]),
     );
   }
   setEmpty(!modelMeta);
@@ -707,7 +722,7 @@ async function loadFromBlob(blob, name, opts) {
   const buf = await blob.arrayBuffer();
   // A file can be dropped the instant the page opens; make sure three.js is up.
   await ensureStarted();
-  await acceptModel(buf, { name, size: blob.size, source: 'file' }, opts);
+  await acceptModel(buf, { name, size: blob.size, source: opts?.source || 'file' }, opts);
 }
 
 /**
@@ -730,18 +745,90 @@ async function loadDefaultModel() {
   }
 }
 
+/**
+ * Fetch a model over the network and put it on the stage.
+ *
+ * `source` is recorded in `modelMeta` so the HUD (and the probe) can tell where
+ * the body came from — the page's own URL box and an agent's stored URL are
+ * different things even though both arrive by `fetch`.
+ *
+ * Throws on failure; callers decide whether that is fatal or a fall-through.
+ */
+async function fetchUrlBody(url, source) {
+  const res = await fetch(url, { mode: 'cors' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const blob = await res.blob();
+  const name = decodeURIComponent((url.split('/').pop() || 'model.vrm').split('?')[0]);
+  // A URL is a reference, not an upload: fetch it every time rather than
+  // silently keeping a copy of someone else's model.
+  await loadFromBlob(blob, name, { persist: false, source });
+}
+
+/** The page's own "Load URL" box: an ad-hoc look, not stored anywhere. */
 async function loadFromUrl(url) {
   try {
-    const res = await fetch(url, { mode: 'cors' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const blob = await res.blob();
-    const name = decodeURIComponent((url.split('/').pop() || 'model.vrm').split('?')[0]);
-    // A URL is a reference, not an upload: fetch it every time rather than
-    // silently keeping a copy of someone else's model.
-    await loadFromBlob(blob, name, { persist: false });
+    await fetchUrlBody(url, 'url');
   } catch (e) {
     toast('Could not fetch that URL (CORS or 404): ' + (e?.message || e), 'err');
   }
+}
+
+/**
+ * The URL this agent carries on the server (`variables.defaults.vrm_url`, set
+ * from its create form or Config tab). Returns the source string on success,
+ * or null when there is no URL or it could not be read.
+ *
+ * A failure here is deliberately NOT fatal. A model host that blocks
+ * cross-origin reads, or a URL that has since 404'd, must not leave the stage
+ * empty — the user still has whatever they picked for themselves, so the
+ * caller falls through to that.
+ */
+async function loadAgentUrlBody(agentId) {
+  let url = null;
+  try { url = await getAgentVrmUrl(agentId); } catch { url = null; }
+  if (!url) return null;
+  try {
+    await fetchUrlBody(url, 'agent-url');
+    return 'agent-url';
+  } catch (e) {
+    lastError = { stage: 'agent-url', message: e?.message || String(e) };
+    console.error('[vrmcall] agent VRM URL failed', e);
+    toast(`This agent’s VRM URL would not load (${e?.message || e}) — using another model.`, 'err');
+    return null;
+  }
+}
+
+/**
+ * Decide whose body is on the stage, in order:
+ *
+ *   1. `agent-url` — the URL stored on the selected agent itself, in its
+ *                    `variables.defaults.vrm_url`. It travels with the agent, so
+ *                    this is the only source that is the same on every machine.
+ *   2. `restore`   — the model the user last picked for themselves (`fd3.vrm`).
+ *   3. `default`   — the avatar that ships with the studio.
+ *
+ * There is no per-agent *file* source. A local `.vrm` could only ever be worn
+ * in the browser that uploaded it, which is not "the agent has a body" — it is
+ * a body that silently disappears on any other machine. The agent's body is
+ * whatever its URL says, everywhere.
+ *
+ * Returns which one won, which is what the probe asserts on.
+ */
+async function loadBodyFor(agentId) {
+  if (agentId) {
+    const viaUrl = await loadAgentUrlBody(agentId);
+    if (viaUrl) return viaUrl;
+  }
+  try {
+    const buf = await idbGet(MODEL_KEY);
+    const meta = await idbGet(META_KEY);
+    if (buf) {
+      await acceptModel(buf, { ...(meta || {}), source: 'restore' }, { persist: false });
+      return 'restore';
+    }
+  } catch { /* no IndexedDB, or nothing stored */ }
+  await loadDefaultModel();
+  return 'default';
 }
 
 // ---------------------------------------------------------------------------
@@ -761,12 +848,10 @@ async function ensureStarted() {
       loop();
       // The bundled avatar is the default, so a first visit needs no file
       // picker and the stage is never empty. A model the user picked last
-      // session still wins — their avatar is not silently replaced by ours.
+      // session still wins — their avatar is not silently replaced by ours —
+      // and an agent's own attached VRM wins over both.
       try {
-        const buf = await idbGet(MODEL_KEY);
-        const meta = await idbGet(META_KEY);
-        if (buf) await acceptModel(buf, { ...(meta || {}), source: 'restore' }, { persist: false });
-        else await loadDefaultModel();
+        await loadBodyFor($('#vrmAgent')?.value || '');
       } catch { await loadDefaultModel(); }
     } catch (e) {
       lastError = { stage: 'init', message: e?.message || String(e) };
@@ -781,17 +866,46 @@ async function ensureStarted() {
   return starting;
 }
 
-function openIfActive() {
+async function openIfActive() {
   if (!$('#view-vrmcall')?.classList.contains('active')) return;
-  ensureStarted();
   // The agent dropdown is filled at init like the Call page's, but a page opened
   // after a failed first fetch (or before the server had a key) would otherwise sit
   // empty until the user happened to focus the select. Opening the page retries.
-  if (!call?.hasAgents()) call?.loadAgents();
+  //
+  // Awaited *before* the viewer boots: the selected agent decides whose body loads,
+  // and starting first would load one model and immediately replace it with another.
+  if (!call?.hasAgents()) await call?.loadAgents();
+  ensureStarted();
+}
+
+/**
+ * Retire the old per-agent VRM database.
+ *
+ * Agents used to be able to carry a `.vrm` *file* kept in this browser
+ * (`fd3.agentvrm` — several megabytes each). That option is gone, because a
+ * body that only exists in the browser that uploaded it is not a body the agent
+ * has. The database would otherwise sit in the user's storage quota forever
+ * with nothing left to read it, so it is dropped once, on the next visit.
+ *
+ * `onblocked` deliberately does not set the flag: that means another tab still
+ * has the database open, so the drop has not happened and must be retried.
+ */
+function dropRetiredVrmStore() {
+  if (typeof indexedDB === 'undefined') return;
+  try {
+    if (localStorage.getItem('fd3.agentvrm.dropped')) return;
+  } catch { return; }                        // no localStorage: leave well alone
+  try {
+    const req = indexedDB.deleteDatabase('fd3.agentvrm');
+    const done = () => { try { localStorage.setItem('fd3.agentvrm.dropped', '1'); } catch {} };
+    req.onsuccess = done;
+    req.onerror = done;
+  } catch { /* nothing stored: nothing to drop */ }
 }
 
 // ---------------------------------------------------------------------------
 export function initVrmCall() {
+  dropRetiredVrmStore();
   // The call is the same object the Live Call page uses, bound to `vrm*` ids.
   call = createAgentCall({
     id: 'vrm',
@@ -887,6 +1001,20 @@ export function initVrmCall() {
     loadFromUrl(url);
   });
 
+  // Switching agent switches body: the agent's own VRM if it has one, otherwise
+  // the model the user picked for themselves, otherwise the bundled avatar. (Not
+  // before the viewer is up — the boot path already chose one.)
+  $('#vrmAgent')?.addEventListener('change', e => { if (started) loadBodyFor(e.target.value); });
+
+  // Setting or clearing an agent's VRM URL happens on its Config tab, in another
+  // view. Re-apply it here so the stage cannot be left wearing a body that was
+  // just cleared — or missing one that was just set.
+  onAgentVarsChange(agentId => {
+    if (!started) return;                                    // the boot path reads it
+    if (agentId !== ($('#vrmAgent')?.value || '')) return;   // not the agent on stage
+    loadBodyFor(agentId);
+  });
+
   const stage = $('#vrmStage');
   if (stage) {
     // With no model loaded the stage is a big "click to add one" target; with a
@@ -909,7 +1037,16 @@ export function initVrmCall() {
     // bundled avatar comes back, so the stage is never left without a body.
     try { await idbClear(); } catch {}
     await loadDefaultModel();
-    toast('Model removed — back to the bundled avatar.', '');
+    // An agent's own body lives on the server and is deliberately not cleared
+    // here, because this button means "forget *my* model". Saying nothing would
+    // make the avatar coming back read as "Remove failed", since selecting the
+    // agent again restores its body.
+    const agentId = $('#vrmAgent')?.value || '';
+    let hasUrl = null;
+    try { hasUrl = agentId ? await getAgentVrmUrl(agentId) : null; } catch {}
+    toast(hasUrl
+      ? 'Bundled avatar for now — this agent has its own VRM URL set (clear it on the agent’s Config tab).'
+      : 'Model removed — back to the bundled avatar.', '');
   });
 
   // ---- viewer controls -----------------------------------------------------

@@ -4,7 +4,7 @@ import { $, $$, el, toast, apiFetch, modal, close } from './api.js';
 import { stopPreview } from './audio.js';
 import { initStudio } from './studio.js';
 import { initScenes } from './scenes.js';
-import { initVoices } from './voices.js';
+import { initVoices, initMyVoices } from './voices.js';
 import { initExamples } from './examples.js';
 import { initLipsync } from './lipsync.js';
 import { initAgents } from './agents.js';
@@ -17,6 +17,7 @@ const VIEWS = {
   scenes:  { title: 'Scenes',         sub: 'Multi-speaker dialogue in one pass' },
   design:  { title: 'Voice Design',   sub: 'Generate a voice from a description' },
   library: { title: 'Voices',         sub: 'Your voice models and reference clips' },
+  myvoices:{ title: 'My Voices',      sub: 'Every voice this account has created' },
   examples:{ title: 'Examples',       sub: 'Every Drama 3 feature, ready to load' },
   lipsync: { title: 'Lip Sync',       sub: 'Bake game-ready mouth tracks from a line' },
   agents:  { title: 'Agents',         sub: 'Design, publish and monitor voice agents' },
@@ -144,6 +145,7 @@ function boot() {
   initStudio();
   initScenes();
   initVoices();
+  initMyVoices();
   initExamples();
   initLipsync();
   initAgents();

@@ -66,6 +66,11 @@ real sample** of any voice (each card shows the sample's transcript too). Click 
 card to load its `reference_id` into the studio. Upload a 10–30 s clip with its
 transcript to clone a new voice.
 
+▶ is one shared helper (`voicepreview.js`), so it behaves identically on this
+page, on My Voices and in every 🔍 picker: a real `samples[]` recording when the
+voice has one, and a short synthesized line otherwise — see
+[My Voices](#my-voices-myvoices) for why that fallback exists.
+
 **One picker everywhere.** Anywhere the app holds a `reference_id` there is a 🔍
 button that opens the *same* searchable, previewable library popup:
 
@@ -74,7 +79,72 @@ button that opens the *same* searchable, previewable library popup:
 | Studio | Voice (reference_id) |
 | Scenes | one per speaker — each speaker keeps their own voice |
 | Lip Sync | the avatar voice |
-| Agents | the agent's Voice id (picking one also sets its speaking language) |
+| Agents → Config | the agent's Voice id (picking one also sets its speaking language) |
+| Agents → ＋ New agent | the same, on the create form |
+
+**Your own voices are the first group in it.** The picker fetches the account's
+models (`self=true`) alongside the public listing and shows them under **🎙 My
+Voices** above **🌐 Voice library**; a voice of yours that is also published stays
+in the first group rather than appearing twice. Typing in the box searches *both*
+— `title=` alone is the public library and would not find what you just created.
+If the own-voices fetch fails the picker degrades to the public list, which is
+exactly what it was before.
+
+> **A modal can open a modal, and the one underneath survives.** The picker is
+> opened *from* the agent create form, and both are panels of the same
+> `#modalBody` — so opening the picker used to replace the form's nodes and
+> closing it shut the whole overlay, which read as "clicking 🔍 threw away the
+> agent I was half-way through naming". `modal()`/`close()` in `api.js` now keep
+> the outgoing panel on a stack and re-attach the *same* elements, so every field
+> still holds what was typed. The complex-tag picker attached to a prompt field
+> inside that form was affected the same way and is fixed by the same change.
+
+### My Voices (`myvoices`)
+Every voice **this account** has created — an uploaded reference clip or a saved
+design — on its own page, newest first.
+
+It exists because they are invisible everywhere else. The public library is
+`GET /model`, which does not contain your own private models, and
+`author_id=<you>` returns nothing; only `self=true` is the account's own shelf.
+So an uploaded voice used to be created, toasted, and then reachable nowhere in
+the app.
+
+- **▶ on every card — and in every picker.** Fish generates `samples[]` only for
+  *published* voices, so an uploaded one has none. A voice with no sample used to
+  render a ▶ that was **disabled** and tooltipped "No sample", which is exactly
+  the voice you cannot audition, in the one list that exists to let you pick one.
+  One shared helper (`voicepreview.js`) now decides what ▶ does everywhere: the
+  real sample if there is one, otherwise a short line synthesized with the model
+  as its own `reference_id` (the same call the studio makes with that id). It
+  spends API credit and the tooltip says so; a `402` on an empty balance is
+  surfaced verbatim rather than swallowed. The result is cached per voice, so
+  pressing ▶ twice plays twice and pays once.
+- **The preview line is yours to set.** A synthesized preview has to say
+  *something*, and the first version of this said a hardcoded `"Welcome to Fish
+  Audio."` — so every sampleless voice in the app was auditioned with the same
+  branded jingle, and pressing ▶ on five different voices played one identical
+  sentence. The reasonable conclusion was "this is generic audio", and about the
+  *content* it was. The default is now a neutral pangram, the sentence is editable
+  in the **🔊 Preview line** panel (saved in this browser, applied to every ▶ in
+  the app), and a voice that has its own transcript on Fish still speaks that
+  instead — it is the only text genuinely *of* that voice.
+- **The state is shown, not assumed** — Fish's own `state` word
+  (trained / training / failed), plus visibility, language and creation time.
+- **⧉ Copy id** to paste the `reference_id` into the studio, a Scenes speaker or
+  an agent's config; clicking the card itself loads it into the studio.
+- **Search is server-side** (`self=true&title=…`), for the same reason the voice
+  picker's is: filtering the loaded page cannot find a voice outside it.
+- **Examples while the shelf is empty.** With no voices of your own the page
+  offers six voices from the public library, keeping their real `samples[]` so ▶
+  plays a recording rather than spending credit. They are rendered *outside*
+  `#myVoiceGrid` — that grid means "voices you made", and a probe reading it must
+  never see them — and they disappear the moment the account has one of its own.
+- Creating a voice here *or* on Voices refreshes **both** lists, so a new one
+  appears immediately instead of after the next reload.
+
+> The **Voices** page still lists the public library only, so a voice you just
+> created is reachable from My Voices and from every 🔍 picker, but not from that
+> page's own grid. That is the next thing to fix, not something My Voices solves.
 
 ### Lip Sync (`lipsync`)
 Turns a Drama 3 line into a **game-ready mouth track** and previews it on the
@@ -223,6 +293,63 @@ attach), **Tests** (next_reply / tool / simulation, run), **Versions**,
 **Sessions** (transcripts, tool calls, analysis, recording), **Webhooks**
 (conversation-init + post-call), **Widget** (embed snippet) and **Phone**
 (numbers, bind, buy, outbound calls).
+
+#### An agent can have a body — a URL, stored on the agent
+
+`＋ New agent` and the agent's **Config** tab both carry an optional **VRM URL**,
+so an agent created without one can still get one later. The VRM Call page loads
+it when that agent is selected.
+
+It is a URL and not a file, and that is the whole design. A `.vrm` is several
+megabytes, the Fish API has no avatar field (`AgentVoiceConfigView` is voice_id,
+speaking_language, expressive, speed and pronunciation ids), and the only other
+place to put bytes is the browser — so a local file could be worn in exactly one
+browser and would silently vanish everywhere else. That is not "the agent has a
+body", it is "this browser has a body". A URL lives in the agent's own
+`variables.defaults` on the server, so the agent carries its body with it.
+
+The VRM Call page picks the body in this order:
+
+| | source | where it lives |
+| --- | --- | --- |
+| 1 | the selected agent's VRM URL — `model.source === 'agent-url'` | the agent, on Fish |
+| 2 | the model the user last picked for themselves — `model.source === 'restore'` | this browser (`fd3.vrm`) |
+| 3 | the bundled `AvatarSample_B.vrm` — `model.source === 'default'` | the studio |
+
+Switching agent switches body, so the page cannot be left showing the wrong
+agent's avatar. Four things are deliberate:
+
+- **`variables.defaults` is the only agent-scoped store the API offers**, and the
+  map **replaces as a whole** — so every write is read-modify-write
+  (`agentvars.js`). Sending `{vrm_url}` alone to an agent that also had
+  `{tone: 'warm'}` would delete `tone`. The read-modify-write is not atomic (there
+  is no compare-and-set), but it is far better than sending a map that is minutes
+  old. `tools/probe_variables.cjs` measures all of this against the live API and
+  restores the agent afterwards.
+- **A variables-only PATCH is a real partial patch.** Verified, not assumed: if it
+  were a full replace, setting a VRM URL would erase the agent's prompt and voice.
+- **Variable names are validated, and `vrm_url` is legal.** Measured against the
+  live API, the rule is `^[A-Za-z][A-Za-z0-9_]*$` — a letter first, then letters,
+  digits and underscores. `_probe`, `__probe`, `probe-rmw`, `probe.rmw`, `1probe`,
+  `"probe rmw"` and `áccent` are all rejected with a `422 Invalid dynamic variable
+  name`. The feature's key was chosen to satisfy this, and the harness asserts the
+  rule rather than trusting it.
+- **A URL that will not load is not fatal.** A model host that blocks cross-origin
+  reads, or a URL that has since 404'd, falls through to the next source with a
+  toast — the stage is never left empty by someone else's server.
+- **The agents load before the viewer boots.** The selected agent decides whose
+  body loads, so starting the viewer first would load one model and immediately
+  replace it with another.
+
+Setting a URL writes straight to the server rather than into the Config tab's
+unsaved draft, so the **🔤 Variables** editor is re-rendered from the server's
+answer on every change — otherwise a later *Save changes* would send back a stale
+`defaults` map and drop the key that was just written.
+
+> **Retired: the per-agent file.** Earlier versions kept a `.vrm` in
+> `fd3.agentvrm` (a second IndexedDB, keyed by `agent_id`). It is gone, and the
+> database is dropped once on the next visit rather than left occupying the
+> user's storage quota with nothing reading it.
 
 ### Live Call (`live`)
 In-browser voice calls via `@fishaudio/agent-client` — mic, orb + FFT
@@ -602,7 +729,8 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/drama3.js      the Drama 3 grammar: highlight, auto-tag, scene parsing
   js/studio.js      editor, generation, player, takes, inpainting
   js/scenes.js      multi-speaker dialogue
-  js/voices.js      voice design + library (with sample playback)
+  js/voices.js      voice design + My Voices + library (with sample playback)
+  js/voicepreview.js what ▶ does on a voice, shared by every list and picker
   js/voicepicker.js the one searchable voice-library popup, used by every view
   js/library.js     session-wide audio library (Studio → Lip Sync handoff)
   js/lipsync.js     lip sync page: actors, generate → bake → preview on the face
@@ -613,12 +741,15 @@ web/                the studio (vanilla JS ES modules, no build step)
   js/livecall.js    the Live Call page (binds agentcall to the live* ids)
   js/vrmcall.js     the VRM Call page: a three.js/three-vrm avatar whose mouth the call drives
   js/emote.js       ChatVRM's expression side — lip sync, emotions, blinking, look-at
+  js/agentvars.js   an agent's variables.defaults on the server (the VRM URL lives here)
   vrm/              the bundled default avatar + idle clip (6.9 MB, served by the studio)
 tools/visemes.py    the Fish-anchored viseme baker (openfacefx, optional allosaurus)
 tools/fixtures/     the tracked bake fixture (a real streamed Fish line + anchors)
 tools/bake_debug.py run the baker directly and print the real traceback
 tools/compare_bakers.py  studio-only viseme checks (well-formed, loud-audio, phones, guard)
-tools/verify_ui.cjs      headless-Chrome UI harness (33 checks)
+tools/verify_ui.cjs      headless-Chrome UI harness (59 checks)
+tools/probe_variables.cjs  the agent-variables round trip + the variable-name rule (live API)
+tools/probe_clone_fidelity.py  how faithfully each TTS model reproduces a reference voice
 tools/verify_lipsync.cjs headless-Chrome lip-sync harness (58 checks, real API)
 tools/probe_duo.cjs      two-hander playback probe — no API, hand-built takes
 tools/probe_examples.cjs  synthesize the complex examples end to end (1 call each)
@@ -640,14 +771,18 @@ openapi.json        cached Fish Audio OpenAPI schema
 ## Verification
 
 ```bash
-NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 33/33, no credit needed
+NODE_PATH=.../node_modules node tools/verify_ui.cjs        # 59/59, no credit needed
 NODE_PATH=.../node_modules node tools/probe_duo.cjs        # two-hander + min-hold, no credit needed
 NODE_PATH=.../node_modules node tools/verify_lipsync.cjs   # needs real API credit
 NODE_PATH=.../node_modules node tools/probe_call_failures.cjs   # call errors, no credit
-NODE_PATH=.../node_modules node tools/probe_vrm.cjs             # the bundled avatar + idle clip, no credit
+NODE_PATH=.../node_modules node tools/probe_vrm.cjs             # 53/53 — the bundled avatar, its idle clip, and an agent's body by URL
 NODE_PATH=.../node_modules node tools/probe_vrm.cjs avatar.vrm  # also: my own model over the default
+node tools/probe_variables.cjs                             # 9/9 — the agent-variables round trip (writes and restores one key)
+python tools/probe_clone_fidelity.py                       # does the clone sound like the voice? (spends credit)
+python tools/probe_clone_fidelity.py --vs-default           # …and how far it sits from the generic default voice
 python tools/compare_bakers.py                                    # viseme correctness, no credit
 python tools/compare_bakers.py --endpoint http://127.0.0.1:8756   # + the shipped HTTP path
+FISH_UI_LIVE_PREVIEW=1 NODE_PATH=... node tools/verify_ui.cjs     # + presses ▶ on My Voices (spends credit)
 ```
 
 `compare_bakers.py` needs the **system** Python (the one with `numpy`,
@@ -656,9 +791,37 @@ python tools/compare_bakers.py --endpoint http://127.0.0.1:8756   # + the shippe
 
 `verify_ui.cjs` drives the running app in headless Chrome and asserts the studio,
 tag insertion, wrapping, auto-tag, scenes, design, voice samples (including that
-the sample MP3 is actually fetched from the CDN), the voice picker, the examples
-library, agents, modal, live view and settings all work — and that the console is
-clean.
+the sample MP3 is actually fetched from the CDN), the voice picker, **My Voices**,
+the examples library, agents, modal, live view and settings all work — and that
+the console is clean.
+
+The My Voices checks compare the ids on screen against the API's own `self=true`
+answer rather than counting cards. That page renders 100 well-formed tiles
+whether or not the filter survives — dropping `self=true` silently turns it into
+a second copy of the public library and looks entirely correct — so the check
+asserts the shown ids *are* the account's and that no public id leaked in. It
+also asserts every card has a live ▶ rather than the library's disabled one, and
+that clicking a card reaches `#voiceId`. `FISH_UI_LIVE_PREVIEW=1` additionally
+presses it and waits for playback, which is opt-in because it spends credit.
+
+The picker and modal checks are built the same way, and two of them exist because
+a check that cannot fail is not a check:
+
+- **The de-duplication is reachable only by stubbing.** This account's voice is
+  private, so the public listing never contains it and `adopt()`'s filter would
+  be invisible — the check would pass against a picker that lists it twice. The
+  harness injects the own voice into the public `/model` response instead, which
+  is exactly the case the filter is for.
+- **"The form survived" is checked with two marked fields.** The name field holds
+  `MARKER-agent-name` and the voice id holds a non-id marker before the picker
+  opens; afterwards the name must be unchanged (proving the *same* nodes came
+  back, not a rebuilt form) and the voice id must be the first My Voices id.
+
+Both were mutation-tested: dropping the modal stack, dropping `self=true`, and
+severing the pick→field write each flip the intended checks to FAIL. One
+prediction was wrong and worth recording — the de-dup check does *not* catch a
+dropped `self=true`, because the stub feeds the own voice to both queries; the
+group check catches that one instead.
 
 `probe_duo.cjs` is the cheap, deterministic half of the two-hander coverage: it
 injects two hand-built takes (a generated WAV plus a hand-written sidecar)
@@ -723,7 +886,13 @@ hip offset was removed, that the gaze still converges on the camera while the cl
 plays (read by orbiting with a real drag, since the look-at target is parented to
 it), that no track binds this clip's head, that the emote controller applies
 ChatVRM's weights (neutral `×0.5`, an emotion `×0.25`, back to `×0.5` on neutral),
-and that **✕ Remove** restores the bundled avatar. Pass a `.vrm` and it
+and that **✕ Remove** restores the bundled avatar. It also drives the real
+Config tab to set an agent's VRM **URL**, asserts the URL is stored on the *agent*
+(reading the API with `{fresh: true}`, because the cached read is the very value
+the UI just wrote), that selecting that agent puts `source === 'agent-url'` on the
+stage, that re-selecting it re-reads rather than keeping the previous body, that
+there is no `.vrm` file input left anywhere in the panel, and that **✕ Remove**
+clears the server key and leaves no trace on the account. Pass a `.vrm` and it
 additionally loads it through the **real file picker**, waits for the *uploaded*
 model by name rather than `model.loaded` (the default is already loaded, so that
 alone would pass too early), and checks the clip is rebuilt for it — then asserts
@@ -735,3 +904,34 @@ agent, so the level is injected through `window.__vrmcall.feed()` — everything
 downstream of that point is the shipped path. On a machine without a GPU (a VM or
 CI box), pass software WebGL:
 `CHROME_ARGS="--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader"`.
+
+`probe_variables.cjs` is a *measurement*, not a UI test, and it exists because the
+whole agent-VRM feature rests on claims about `/v1/agent/agents/{id}/config` that
+were worth checking rather than assuming: that a `variables`-only PATCH is
+accepted, that it is a genuine **partial** patch (prompt/voice/llm are
+fingerprinted before and after — if it were a full replace, setting a VRM URL
+would erase the agent), that the value round-trips, that the map **replaces as a
+whole** (so a read-modify-write is required and existing keys survive it), and
+what a legal variable name is. It needs a real API key and no browser.
+
+> **Harnesses that touch a live account must restore, not clean up.** This one and
+> `probe_vrm.cjs` both write to a real agent on a real account, and both were
+> originally written to "leave no trace" by *deleting* what they had written. That
+> is only correct while the agent happens to be blank: the moment a `vrm_url` was
+> actually configured, the harnesses overwrote it and then deleted it, and the
+> `probe_variables` check for it reported a false failure because it asserted the
+> key was *absent* rather than *unchanged*. Both now snapshot the agent's own
+> value first and restore it verbatim, and both assert the restoration. A test
+> that quietly destroys the configuration it is testing is worse than no test.
+
+`probe_clone_fidelity.py` answers "does the clone actually sound like the voice?"
+with numbers instead of an opinion, because the question came up and guessing at
+it is easy. It takes public voices that ship a real `samples[0].audio`, synthesizes
+each voice's own transcript through its own `reference_id` once per model, and
+compares every synthesis to the *recording* on two speaker-identity proxies: the
+mean log-mel spectrum (timbre) and median F0 from autocorrelation (pitch). It
+reports the models ranked by distance to the reference. `--vs-default` is the
+sharper version of the same idea — it measures how far a voice's output sits from
+the *same text with no `reference_id`*, so "is this a strong clone or is it
+drifting toward the default voice" is a number rather than a suspicion. It spends
+a little credit and writes nothing.

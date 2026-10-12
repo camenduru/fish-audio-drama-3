@@ -2,6 +2,7 @@
 
 import { $, el, toast, modal, close, fish, esc, fmtBytes, fmtTime } from './api.js';
 import { openVoicePicker } from './voicepicker.js';
+import { getAgentVrmUrl, setAgentVrmUrl, deleteAgentVrmUrl, normalizeVrmUrl } from './agentvars.js';
 import { attachTagButton } from './tags.js';
 
 const SPEAKING_LANGS = ['en','ja','zh','ko','es','fr','de','pt','it','nl','ar','hi','id','tr','ru','bg','sr','hr','cs','sk','pl','uk','ro','hu','el','sv','da','no','fi','et','lv','lt','ca','he','fa','ur','kk','ka','hy','bn','ta','te','kn','mr','gu','pa','ne','th','vi','ms','tl','af'];
@@ -67,17 +68,141 @@ function renderList() {
 }
 
 // ---------------------------------------------------------------------------
+// The optional VRM an agent wears on the VRM Call page
+// ---------------------------------------------------------------------------
+/**
+ * Build the agent's VRM control: a URL, stored on the agent itself.
+ *
+ * There is deliberately no file option. A `.vrm` is several megabytes, the Fish
+ * API has no avatar field, and the browser is the only other place to put it —
+ * so a local file could only ever be worn in the one browser that uploaded it.
+ * That is not "the agent has a body", it is "this browser has a body", and it
+ * silently differs on every other machine.
+ *
+ * A URL goes into the agent's own `variables.defaults` on the server (see
+ * `agentvars.js`), so the agent carries its body with it and the VRM Call page
+ * fetches it wherever the agent is opened.
+ *
+ * `agentId` is null on the create form: there is no agent to write to until it
+ * exists, so the URL is held and `save(id)` writes it once the API answers. On
+ * the Config tab the id is known, so it stores immediately and Remove clears it.
+ *
+ * @param {string|null} agentId
+ * @param {{onVarsChange?: (defaults: object) => void}} [opts]
+ * @returns {{node: HTMLElement, save: (id: string) => Promise<boolean>}}
+ */
+function agentVrmField(agentId, opts = {}) {
+  const url = el('input.input.mono', { id: 'agVrmUrl', placeholder: 'https://…/avatar.vrm', style: 'font-size:12px' });
+  const useUrl = el('button.btn.sm', { id: 'agVrmUrlUse', title: 'Store this URL on the agent' }, 'Use URL');
+  const status = el('div.hint', { id: 'agVrmStatus', style: 'margin-top:8px' });
+  const remove = el('button.btn.sm.danger', { id: 'agVrmRemove', style: 'margin-top:8px' }, '✕ Remove VRM');
+
+  const node = el('div', {}, [
+    el('div.hint.mb', {}, 'Optional. A .vrm the VRM Call page wears for this agent — with none set it uses the bundled avatar.'),
+    f('VRM URL', el('div.flex.aic.gap', {}, [url, useUrl]),
+      'Stored on the agent itself (as the variable vrm_url), so it travels with the agent. The URL must allow cross-origin reads.'),
+    status,
+    remove,
+  ]);
+
+  let urlValue = null;    // stored on the agent, server-side
+  let pendingUrl = null;  // create form only: typed but not yet written
+
+  function paint() {
+    const v = urlValue || pendingUrl;
+    status.textContent = v
+      ? `🔗 ${v}${pendingUrl ? ' · saved when you create the agent' : ' · loads on the VRM Call page'}`
+      : 'No VRM URL set — this agent uses the bundled avatar.';
+    remove.classList.toggle('hidden', !v);
+  }
+
+  remove.addEventListener('click', async () => {
+    remove.disabled = true;
+    try {
+      // Create form: nothing has been written yet, so there is nothing to clear
+      // on the server — just forget what was typed.
+      if (!agentId) { pendingUrl = null; url.value = ''; paint(); return; }
+      const defaults = await deleteAgentVrmUrl(agentId);
+      urlValue = null; url.value = '';
+      paint();
+      opts.onVarsChange?.(defaults);
+      toast('VRM removed — this agent uses the bundled avatar again.', '');
+    } catch (e) { toast('Could not remove the VRM: ' + e.message, 'err'); }
+    finally { remove.disabled = false; }
+  });
+
+  useUrl.addEventListener('click', async () => {
+    let normalized;
+    try { normalized = normalizeVrmUrl(url.value); }
+    catch (e) { toast('That VRM URL is not usable: ' + e.message, 'err'); return; }
+    if (!normalized) { toast('Paste a VRM URL first.', 'err'); return; }
+
+    // No id yet — the create form. Hold it and let save() write it, rather than
+    // failing on an agent that does not exist.
+    if (!agentId) { pendingUrl = normalized; url.value = normalized; paint(); return; }
+
+    useUrl.disabled = true;
+    try {
+      const defaults = await setAgentVrmUrl(agentId, normalized);
+      urlValue = normalized; url.value = normalized;
+      paint();
+      opts.onVarsChange?.(defaults);
+      toast('Saved on the agent — it now wears this URL everywhere.', 'ok');
+    } catch (e) { toast('Could not save the URL on the agent: ' + e.message, 'err'); }
+    finally { useUrl.disabled = false; }
+  });
+
+  paint();
+  if (agentId) {
+    getAgentVrmUrl(agentId)
+      .then(v => { if (v) { urlValue = v; url.value = v; paint(); } })
+      .catch(() => { /* no key on the server, or no network: leave it blank */ });
+  }
+
+  /** Write the URL typed on the create form under the agent that was just made. */
+  async function save(id) {
+    if (!pendingUrl) return false;
+    try { await setAgentVrmUrl(id, pendingUrl); return true; }
+    catch (e) {
+      // The agent exists either way — only the URL failed, and saying that is
+      // better than a message that reads like the whole create failed.
+      toast('Agent created, but the VRM URL could not be saved on it: ' + e.message, 'err');
+      return false;
+    }
+  }
+
+  return { node, save };
+}
+
+// ---------------------------------------------------------------------------
 // Create
 // ---------------------------------------------------------------------------
 function newAgentModal() {
   const name = inp('', null, { placeholder: 'Support agent' });
   const desc = inp('', null, { placeholder: 'What this agent is for' });
   const prompt = ta('You are a friendly, concise voice assistant. Keep replies short and natural for speech.', 5);
-  const voice = inp('b347db033a6549378b48d00acb0d06cd', null, { class: 'input mono' });
+  const voice = inp('b347db033a6549378b48d00acb0d06cd', null, { class: 'input mono', id: 'agNewVoice' });
   const lang = sel(SPEAKING_LANGS, 'en', null);
+  // The create form is the first place an agent's voice is chosen, so it gets the
+  // same 🔍 the Config tab has — hand-typing a 32-char id was the only way in.
+  // Picking one also sets the speaking language, exactly as Config does, so a
+  // non-English voice is not left on `en`.
+  const voiceRow = el('div.flex.aic.gap', {}, [
+    voice,
+    el('button.btn.sm.icon', {
+      id: 'agNewVoicePick',
+      title: 'Browse the voice library — your own voices first',
+      onclick: () => openVoicePicker((id, title, m) => {
+        voice.value = id;
+        if (m?.languages?.length && SPEAKING_LANGS.includes(m.languages[0])) lang.value = m.languages[0];
+        toast('Agent voice → ' + title, 'ok');
+      }),
+    }, '🔍'),
+  ]);
   const llm = sel(LLM_MODELS, 'google/gemini-3.6-flash', null);
   const firstMode = sel([['prompt', 'prompt (model decides)'], ['fixed', 'fixed text'], ['off', 'off']], 'prompt', null);
   const firstMsg = inp('Hi! Thanks for calling — how can I help you today?', null);
+  const vrm = agentVrmField(null);
   const create = el('button.btn.primary', { onclick: async () => {
     if (!name.value.trim()) { toast('Name is required.', 'err'); return; }
     create.disabled = true; create.innerHTML = '<span class="spinner"></span> Creating…';
@@ -91,7 +216,10 @@ function newAgentModal() {
         },
       };
       const a = await fish.post('v1/agent/agents', body);
-      toast('Agent created — publish it to go live.', 'ok');
+      // The id only exists now, which is why the model is written here and not
+      // when it was picked.
+      const withBody = await vrm.save(a.agent_id);
+      toast(withBody ? 'Agent created with its VRM body.' : 'Agent created — publish it to go live.', 'ok');
       close(); await loadAgents(); openAgent(a.agent_id);
     } catch (e) { toast('Create failed: ' + e.message, 'err'); }
     finally { create.disabled = false; create.textContent = 'Create agent'; }
@@ -101,9 +229,10 @@ function newAgentModal() {
     body: el('div', {}, [
       el('div.row', {}, [f('Name', name), f('Description', desc)]),
       f('System prompt', prompt, 'The agent’s instructions. Keep it speech-friendly.'),
-      el('div.row', {}, [f('Voice id', voice), f('Speaking language', lang)]),
+      el('div.row', {}, [f('Voice id', voiceRow), f('Speaking language', lang)]),
       el('div.row', {}, [f('LLM', llm), f('First message mode', firstMode)]),
       f('First message', withTags(firstMsg, 'the first message')),
+      vrm.node,
     ]),
     footer: [el('button.btn', { onclick: close }, 'Cancel'), create],
   });
@@ -220,6 +349,17 @@ async function renderConfig(id, agent, cfg, panel) {
   const varDefaults = ta(JSON.stringify(vars.defaults || {}, null, 2), 4, x => { try { draft.variables = { ...draft.variables, defaults: JSON.parse(x) }; } catch {} });
   const varMissing = sel(['keep', 'empty', 'reject'], vars.on_missing || 'keep', x => draft.variables = { ...draft.variables, on_missing: x });
 
+  // The VRM control writes `vrm_url` straight to the server, so it is built
+  // after the variables editor and keeps it in step: the map on screen must be
+  // the map on the server, or a later "Save changes" would send a stale
+  // `defaults` back and silently drop the key that was just written.
+  const vrmField = agentVrmField(id, {
+    onVarsChange: defaults => {
+      varDefaults.value = JSON.stringify(defaults, null, 2);
+      draft.variables = { ...draft.variables, defaults };
+    },
+  });
+
   const focus = sw('Guardrail: focus', !!gr.focus, x => draft.guardrails = { ...draft.guardrails, focus: x });
   const manip = sw('Guardrail: anti-manipulation', !!gr.manipulation, x => draft.guardrails = { ...draft.guardrails, manipulation: x });
 
@@ -235,6 +375,7 @@ async function renderConfig(id, agent, cfg, panel) {
     ]),
     section('🎙 Voice', [el('div.row', {}, [f('Voice id', voiceRow), f('Speaking language', lang)]),
       el('label.field', {}, [el('span', {}, 'Speed · ', el('b', { id: 'agSpeedVal' }, (+(v.speed ?? 1)).toFixed(2))), speed]), expressive]),
+    section('🧍 Avatar (VRM)', [vrmField.node]),
     section('🤖 Model', [f('LLM', llmSel)]),
     section('💬 Conversation', [el('div.row', {}, [f('Max duration (s)', maxDur), f('Response wait (ms)', wait)]),
       f('Eagerness', eager), interruptible, record, f('Timezone', tz)]),

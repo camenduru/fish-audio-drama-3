@@ -38,17 +38,50 @@ export function toast(msg, kind = '') {
 }
 
 // --------------------------------------------------------------------- modal
+//
+// Modals nest: the voice picker is opened *from* the agent create form, and both
+// live in the same #modalBody. Without a stack, opening the picker replaces the
+// form's nodes, and closing the picker shuts the whole overlay — so a user who
+// clicked 🔍 halfway through naming an agent came back to an empty screen with
+// their work gone. The outgoing panel is kept here instead, and `close()`
+// restores it, re-attaching the *same* elements so every field still holds what
+// was typed.
+const modalStack = [];
+
 export function modal({ title, body, footer, wide = false }) {
   const back = $('#modalBack'), m = $('#modal');
+  const mb = $('#modalBody'), mf = $('#modalFoot');
+  if (back.classList.contains('open')) {
+    modalStack.push({
+      title: $('#modalTitle').textContent,
+      body: [...mb.childNodes],
+      footer: [...mf.childNodes],
+      footShown: mf.style.display !== 'none',
+      wide: m.classList.contains('wide'),
+    });
+  }
   $('#modalTitle').textContent = title || '';
-  const mb = $('#modalBody'); mb.replaceChildren(...(Array.isArray(body) ? body : [body]));
-  const mf = $('#modalFoot'); mf.replaceChildren(...(Array.isArray(footer) ? footer : (footer ? [footer] : [])));
+  mb.replaceChildren(...(Array.isArray(body) ? body : [body]));
+  mf.replaceChildren(...(Array.isArray(footer) ? footer : (footer ? [footer] : [])));
   mf.style.display = (footer && (Array.isArray(footer) ? footer.length : true)) ? '' : 'none';
   m.classList.toggle('wide', wide);
   back.classList.add('open');
   return { close };
 }
-export function close() { $('#modalBack').classList.remove('open'); }
+
+export function close() {
+  const back = $('#modalBack'), m = $('#modal');
+  const prev = modalStack.pop();
+  if (prev) {                       // an outer modal is waiting underneath
+    $('#modalTitle').textContent = prev.title;
+    $('#modalBody').replaceChildren(...prev.body);
+    $('#modalFoot').replaceChildren(...prev.footer);
+    $('#modalFoot').style.display = prev.footShown ? '' : 'none';
+    m.classList.toggle('wide', prev.wide);
+    return;
+  }
+  back.classList.remove('open');
+}
 
 // --------------------------------------------------------------------- fetch
 async function parse(res) {
