@@ -1,5 +1,7 @@
 # Fish Audio Drama 3 Studio
 
+https://github.com/user-attachments/assets/a7fcf6f8-2955-48a0-8418-3f4ac6217696
+
 A complete, self-contained studio for Fish Audio's **Drama 3** text-to-speech
 model *and* the Fish **Agents** platform — every feature from the Drama 3 Voice
 Guide and the whole published `/v1/*` API surface, behind a local server that
